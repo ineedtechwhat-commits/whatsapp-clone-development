@@ -7,6 +7,7 @@ import {
   BellRing,
   Check,
   CircleHelp,
+  Crown,
   ImagePlus,
   LockKeyhole,
   LogOut,
@@ -254,8 +255,8 @@ export function SettingsPanel({
                 <div className="settings-profile-identity">
                   <span className="settings-avatar" aria-hidden="true">{profileImage ? <img src={profileImage} alt="" referrerPolicy="no-referrer" /> : initials(name)}</span>
                   <div className="settings-profile-copy">
-                    <strong>{name || user.name}</strong>
-                    <small>{profileImage ? 'Current profile photo' : 'Add a photo to your profile'}</small>
+                    <strong className="settings-name-line">{name || user.name}{user.isAdmin ? <span className="admin-identity-badge"><Crown aria-hidden="true" /> ADMIN</span> : null}</strong>
+                    <small>{user.isAdmin ? 'Verified F.R.I.E.N.D.S creator' : profileImage ? 'Current profile photo' : 'Add a photo to your profile'}</small>
                     <label className="settings-photo-button">
                       <ImagePlus aria-hidden="true" />
                       <span>{photoPending ? 'Uploading…' : 'Change photo'}</span>
@@ -265,7 +266,8 @@ export function SettingsPanel({
                 </div>
                 <p className="settings-photo-help" id="settings-profile-photo-help">JPG, PNG, WebP, or GIF. Maximum file size: 5 MB.</p>
                 <label className="settings-input" htmlFor="settings-name"><span>Name</span><input id="settings-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={100} required /></label>
-                <label className="settings-input" htmlFor="settings-about"><span>About</span><input id="settings-about" value={about} onChange={(event) => setAbout(event.target.value)} maxLength={120} required /></label>
+                <label className="settings-input" htmlFor="settings-about"><span>About</span>{user.isAdmin ? <textarea id="settings-about" value={about} onChange={(event) => setAbout(event.target.value)} rows={4} required /> : <input id="settings-about" value={about} onChange={(event) => setAbout(event.target.value)} maxLength={120} required />}</label>
+                {user.isAdmin ? <small className="settings-admin-note">Creator accounts are not subject to the standard bio character limit.</small> : null}
                 <div className="settings-readonly"><span>Email</span><strong>{user.email}</strong><small>{user.emailVerified ? 'Verified email' : 'Email verification required'}</small></div>
                 {error ? <p className="settings-error" role="alert">{error}</p> : null}
                 {notice ? <p className="settings-notice" role="status">{notice}</p> : null}
