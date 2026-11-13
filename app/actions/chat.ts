@@ -6,6 +6,7 @@ import { and, asc, eq, gt, inArray, isNull, ne, or } from 'drizzle-orm'
 import { db } from '@/lib/db'
 import {
   accounts,
+  adminControlRecords,
   conversationMembers,
   conversations,
   messages,
@@ -801,6 +802,11 @@ export async function deleteOwnAccountAction(confirmation: string) {
     }
     await tx.delete(messages).where(eq(messages.senderId, userId))
     await tx.delete(conversationMembers).where(eq(conversationMembers.userId, userId))
+    await tx.update(adminControlRecords).set({ status: 'revoked', updatedAt: new Date() }).where(and(
+      eq(adminControlRecords.recordType, 'role'),
+      eq(adminControlRecords.roleUserId, userId),
+      eq(adminControlRecords.status, 'active'),
+    ))
     await tx.delete(userProfiles).where(eq(userProfiles.userId, userId))
     await tx.delete(sessions).where(eq(sessions.userId, userId))
     await tx.delete(accounts).where(eq(accounts.userId, userId))
