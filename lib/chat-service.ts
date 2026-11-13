@@ -15,7 +15,7 @@ import {
 import { getSessionUser } from '@/lib/auth-session'
 import { getUserAccessState } from '@/lib/admin-auth'
 import { profileImageUrl } from '@/lib/media'
-import type { ChatPreferences, ChatUser, ConversationPreview, Contact, StatusGroup, MessageTimer, Visibility } from '@/lib/chat-types'
+import type { AvatarDecoration, ChatPreferences, ChatUser, ConversationPreview, Contact, StatusGroup, MessageTimer, Visibility } from '@/lib/chat-types'
 
 function visibilityPreference(value: string | undefined, fallback: Visibility): Visibility {
   return value === 'everyone' || value === 'contacts' || value === 'nobody' ? value : fallback
@@ -23,6 +23,10 @@ function visibilityPreference(value: string | undefined, fallback: Visibility): 
 
 function messageTimerPreference(value: string | undefined): MessageTimer {
   return value === '24h' || value === '7d' || value === '90d' || value === 'off' ? value : 'off'
+}
+
+function avatarDecorationPreference(value: string | undefined | null): AvatarDecoration {
+  return value === 'square' || value === 'halo' || value === 'orbit' || value === 'spark' ? value : 'minimal'
 }
 
 function defaultUsername(email: string, userId: string) {
@@ -45,6 +49,8 @@ export async function getWorkspaceData() {
     .select({
       about: userProfiles.about,
       username: userProfiles.username,
+      bannerPathname: userProfiles.bannerPathname,
+      avatarDecoration: userProfiles.avatarDecoration,
       notifyMessages: userProfiles.notifyMessages,
       notifyGroupMessages: userProfiles.notifyGroupMessages,
       notifyMentions: userProfiles.notifyMentions,
@@ -73,6 +79,8 @@ export async function getWorkspaceData() {
     email: sessionUser.email,
     emailVerified: Boolean(sessionUser.emailVerified),
     image: profileImageUrl(sessionUser.image ?? null, sessionUser.id),
+    bannerImage: profileImageUrl(profile?.bannerPathname ?? null, sessionUser.id),
+    avatarDecoration: avatarDecorationPreference(profile?.avatarDecoration),
     about: profile?.about ?? defaultAbout,
     username: profile?.username ?? 'friend',
     createdAt: (account?.createdAt ?? new Date()).toISOString(),
@@ -117,7 +125,7 @@ export async function getWorkspaceData() {
   const conversationIds = memberships.map((membership) => membership.conversationId)
   const contactsById = new Map<string, Contact>()
   const conversationsList: ConversationPreview[] = []
-  const peopleByConversation = new Map<string, Array<{ id: string; name: string; email: string; image: string | null; about: string | null }>>()
+  const peopleByConversation = new Map<string, Array<{ id: string; name: string; email: string; image: string | null; bannerImage: string | null; avatarDecoration: AvatarDecoration; about: string | null; username: string | null; createdAt: Date; isAdmin: boolean }>>()
   const typingNamesByConversation = new Map<string, string[]>()
 
   if (conversationIds.length) {
@@ -128,6 +136,9 @@ export async function getWorkspaceData() {
         name: users.name,
         email: users.email,
         image: users.image,
+        createdAt: users.createdAt,
+        bannerPathname: userProfiles.bannerPathname,
+        avatarDecoration: userProfiles.avatarDecoration,
         about: userProfiles.about,
         username: userProfiles.username,
         profilePhotoVisibility: userProfiles.profilePhotoVisibility,
@@ -138,11 +149,21 @@ export async function getWorkspaceData() {
       .innerJoin(users, eq(users.id, conversationMembers.userId))
       .leftJoin(userProfiles, eq(userProfiles.userId, users.id))
       .where(inArray(conversationMembers.conversationId, conversationIds))
-    const presenceRows = participantRows.length
-      ? await db.select({ userId: userPresence.userId, lastActiveAt: userPresence.lastActiveAt }).from(userPresence)
-        .where(inArray(userPresence.userId, Array.from(new Set(participantRows.map((person) => person.id)))))
-      : []
+    const participantIds = Array.from(new Set(participantRows.map((person) => person.id)))
+    const [presenceRows, adminRoleRows] = participantRows.length
+      ? await Promise.all([
+          db.select({ userId: userPresence.userId, lastActiveAt: userPresence.lastActiveAt }).from(userPresence)
+            .where(inArray(userPresence.userId, participantIds)),
+          db.select({ userId: adminControlRecords.roleUserId }).from(adminControlRecords).where(and(
+            eq(adminControlRecords.recordType, 'role'),
+            eq(adminControlRecords.action, 'admin'),
+            eq(adminControlRecords.status, 'active'),
+            inArray(adminControlRecords.roleUserId, participantIds),
+          )),
+        ])
+      : [[], []]
     const presenceByUser = new Map(presenceRows.map((row) => [row.userId, row.lastActiveAt]))
+    const adminUserIds = new Set(adminRoleRows.flatMap((row) => row.userId ? [row.userId] : []))
     const typingRows = await db.select({ conversationId: conversationTyping.conversationId, userId: conversationTyping.userId, name: users.name })
       .from(conversationTyping)
       .innerJoin(users, eq(users.id, conversationTyping.userId))
@@ -152,15 +173,26 @@ export async function getWorkspaceData() {
     }
 
     for (const person of participantRows) {
+      const canViewProfile = person.profilePhotoVisibility !== 'nobody'
+      const isAdmin = adminUserIds.has(person.id)
+      const bannerImage = canViewProfile ? profileImageUrl(person.bannerPathname, person.id) : null
+      const image = canViewProfile ? profileImageUrl(person.image, person.id) : null
+      const avatarDecoration = avatarDecorationPreference(person.avatarDecoration)
       const people = peopleByConversation.get(person.conversationId) ?? []
-      people.push({ ...person, image: profileImageUrl(person.image, person.id) })
+      people.push({ ...person, image, bannerImage, avatarDecoration, isAdmin })
       peopleByConversation.set(person.conversationId, people)
       if (person.id !== sessionUser.id) {
+        const existingContact = contactsById.get(person.id)
         contactsById.set(person.id, {
           id: person.id,
           name: person.name,
           email: person.email,
-          image: person.profilePhotoVisibility === 'nobody' ? null : profileImageUrl(person.image, person.id),
+          image,
+          bannerImage,
+          avatarDecoration,
+          createdAt: person.createdAt.toISOString(),
+          isAdmin,
+          conversationIds: Array.from(new Set([...(existingContact?.conversationIds ?? []), person.conversationId])),
           about: person.aboutVisibility === 'nobody' ? '' : person.about ?? 'Available',
           username: person.username ?? 'friend',
           isOnline: person.lastSeenVisibility !== 'nobody' && Boolean(presenceByUser.get(person.id) && Date.now() - presenceByUser.get(person.id)!.getTime() < 60_000),
@@ -217,6 +249,7 @@ export async function getWorkspaceData() {
       id: membership.conversationId,
       name: membership.title || fallbackName,
       image: membership.isGroup ? null : otherPeople[0]?.image ?? null,
+      avatarDecoration: membership.isGroup ? 'minimal' : otherPeople[0]?.avatarDecoration ?? 'minimal',
       isGroup: membership.isGroup,
       lastMessage: lastMessage?.body ?? null,
       lastMessageAt: (lastMessage?.createdAt ?? membership.updatedAt).toISOString(),
@@ -242,6 +275,7 @@ export async function getWorkspaceData() {
       userId: users.id,
       name: users.name,
       image: users.image,
+      avatarDecoration: userProfiles.avatarDecoration,
       profilePhotoVisibility: userProfiles.profilePhotoVisibility,
     })
     .from(statuses)
@@ -261,6 +295,7 @@ export async function getWorkspaceData() {
       userId: row.userId,
       name: row.userId === sessionUser.id ? 'You' : row.name,
       image: row.userId !== sessionUser.id && row.profilePhotoVisibility === 'nobody' ? null : profileImageUrl(row.image, row.userId),
+      avatarDecoration: avatarDecorationPreference(row.avatarDecoration),
       isMe: row.userId === sessionUser.id,
       items: [],
     }

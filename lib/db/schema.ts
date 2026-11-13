@@ -59,6 +59,8 @@ export const userProfiles = pgTable('user_profile', {
   groupInvitePolicy: text('groupInvitePolicy').notNull().default('everyone'),
   callsPrivacy: text('callsPrivacy').notNull().default('everyone'),
   securityNotifications: boolean('securityNotifications').notNull().default(true),
+  bannerPathname: text('bannerPathname'),
+  avatarDecoration: text('avatarDecoration').notNull().default('minimal'),
   notifyMessages: boolean('notifyMessages').notNull().default(true),
   notifyGroupMessages: boolean('notifyGroupMessages').notNull().default(true),
   notifyMentions: boolean('notifyMentions').notNull().default(true),

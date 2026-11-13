@@ -2,6 +2,7 @@ export const MAX_CHAT_ATTACHMENTS = 5
 export const MAX_CHAT_FILE_BYTES = 20 * 1024 * 1024
 export const MAX_STATUS_FILE_BYTES = 50 * 1024 * 1024
 export const MAX_PROFILE_PHOTO_BYTES = 5 * 1024 * 1024
+export const MAX_PROFILE_BANNER_BYTES = 8 * 1024 * 1024
 
 export const PROFILE_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] as const
 

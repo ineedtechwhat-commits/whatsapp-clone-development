@@ -23,8 +23,8 @@ import {
 } from '@/lib/db/schema'
 import { getSessionUser } from '@/lib/auth-session'
 import { isAdminUserId } from '@/lib/admin-auth'
-import type { ChatPreferences, MessageTimer, Visibility } from '@/lib/chat-types'
-import { isProfilePhotoPathname, MAX_CHAT_ATTACHMENTS, MAX_CHAT_FILE_BYTES, MAX_PROFILE_PHOTO_BYTES, MAX_STATUS_FILE_BYTES, PROFILE_PHOTO_TYPES, STATUS_MEDIA_TYPES, safeDisplayName } from '@/lib/media'
+import type { AvatarDecoration, ChatPreferences, MessageTimer, Visibility } from '@/lib/chat-types'
+import { isProfilePhotoPathname, MAX_CHAT_ATTACHMENTS, MAX_CHAT_FILE_BYTES, MAX_PROFILE_BANNER_BYTES, MAX_PROFILE_PHOTO_BYTES, MAX_STATUS_FILE_BYTES, PROFILE_PHOTO_TYPES, STATUS_MEDIA_TYPES, safeDisplayName } from '@/lib/media'
 
 async function requireUserId() {
   const user = await getSessionUser()
@@ -440,15 +440,17 @@ export async function discardMediaUploadsAction(pathnamesInput: string[]) {
   })))
   if (!pathnames.length) return
 
-  const [usedAttachments, usedStatuses, usedProfilePhotos] = await Promise.all([
+  const [usedAttachments, usedStatuses, usedProfilePhotos, usedProfileBanners] = await Promise.all([
     db.select({ pathname: messageAttachments.pathname }).from(messageAttachments).where(inArray(messageAttachments.pathname, pathnames)),
     db.select({ pathname: statuses.mediaPathname }).from(statuses).where(inArray(statuses.mediaPathname, pathnames)),
     db.select({ pathname: users.image }).from(users).where(inArray(users.image, pathnames)),
+    db.select({ pathname: userProfiles.bannerPathname }).from(userProfiles).where(inArray(userProfiles.bannerPathname, pathnames)),
   ])
   const used = new Set([
     ...usedAttachments.map((row) => row.pathname),
     ...usedStatuses.map((row) => row.pathname).filter((pathname): pathname is string => Boolean(pathname)),
     ...usedProfilePhotos.map((row) => row.pathname).filter((pathname): pathname is string => Boolean(pathname)),
+    ...usedProfileBanners.map((row) => row.pathname).filter((pathname): pathname is string => Boolean(pathname)),
   ])
   const unused = pathnames.filter((pathname) => !used.has(pathname))
   if (unused.length) await del(unused).catch(() => undefined)
@@ -466,13 +468,53 @@ export async function updateProfilePhotoAction(pathnameInput: string) {
     throw new Error('Choose a JPG, PNG, WebP, or GIF image up to 5 MB.')
   }
 
-  const [user] = await db.select({ image: users.image }).from(users).where(eq(users.id, userId)).limit(1)
+  const [user] = await db.select({ image: users.image, bannerPathname: userProfiles.bannerPathname })
+    .from(users).leftJoin(userProfiles, eq(userProfiles.userId, users.id)).where(eq(users.id, userId)).limit(1)
   if (!user) throw new Error('Account not found.')
 
   await db.update(users).set({ image: pathname, updatedAt: new Date() }).where(eq(users.id, userId))
-  if (user.image && user.image !== pathname && isProfilePhotoPathname(user.image, userId)) {
+  if (user.image && user.image !== pathname && user.image !== user.bannerPathname && isProfilePhotoPathname(user.image, userId)) {
     await del(user.image).catch(() => undefined)
   }
+}
+
+const avatarDecorationChoices: AvatarDecoration[] = ['minimal', 'square', 'halo', 'orbit', 'spark']
+
+export async function updateProfileBannerAction(pathnameInput: string) {
+  const userId = await requireUserId()
+  const pathname = pathnameInput.trim()
+  if (!isProfilePhotoPathname(pathname, userId)) throw new Error('Choose a valid profile banner.')
+
+  const metadata = await head(pathname)
+  const contentType = metadata.contentType.toLowerCase()
+  if (!PROFILE_PHOTO_TYPES.includes(contentType as typeof PROFILE_PHOTO_TYPES[number]) || metadata.size > MAX_PROFILE_BANNER_BYTES) {
+    await del(pathname).catch(() => undefined)
+    throw new Error('Choose a JPG, PNG, WebP, or GIF image up to 8 MB.')
+  }
+
+  const [profile] = await db.select({ username: userProfiles.username, bannerPathname: userProfiles.bannerPathname })
+    .from(userProfiles).where(eq(userProfiles.userId, userId)).limit(1)
+  const [account] = profile ? [] : await db.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1)
+  const username = profile?.username ?? `${(account?.email.split('@')[0] ?? 'friend').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 18) || 'friend'}_${userId.slice(-6).toLowerCase()}`
+  await db.insert(userProfiles).values({ userId, username, bannerPathname: pathname, updatedAt: new Date() }).onConflictDoUpdate({
+    target: userProfiles.userId,
+    set: { bannerPathname: pathname, updatedAt: new Date() },
+  })
+
+  const oldBanner = profile?.bannerPathname
+  if (oldBanner && oldBanner !== pathname && isProfilePhotoPathname(oldBanner, userId)) {
+    const [user] = await db.select({ image: users.image }).from(users).where(eq(users.id, userId)).limit(1)
+    if (user?.image !== oldBanner) await del(oldBanner).catch(() => undefined)
+  }
+}
+
+export async function updateAvatarDecorationAction(decorationInput: string) {
+  const userId = await requireUserId()
+  if (!avatarDecorationChoices.includes(decorationInput as AvatarDecoration)) throw new Error('Choose a valid avatar decoration.')
+  const [profile] = await db.select({ userId: userProfiles.userId }).from(userProfiles).where(eq(userProfiles.userId, userId)).limit(1)
+  if (!profile) throw new Error('Profile not found.')
+  await db.update(userProfiles).set({ avatarDecoration: decorationInput as AvatarDecoration, updatedAt: new Date() })
+    .where(eq(userProfiles.userId, userId))
 }
 
 export async function updateProfileAction(nameInput: string, aboutInput: string, usernameInput: string) {
@@ -694,7 +736,8 @@ export async function toggleBlockedUserAction(targetUserIdInput: string) {
 export async function deleteOwnAccountAction(confirmation: string) {
   const userId = await requireUserId()
   if (confirmation !== 'DELETE') throw new Error('Type DELETE to confirm account removal.')
-  const [user] = await db.select({ email: users.email, image: users.image }).from(users).where(eq(users.id, userId)).limit(1)
+  const [user] = await db.select({ email: users.email, image: users.image, bannerPathname: userProfiles.bannerPathname })
+    .from(users).leftJoin(userProfiles, eq(userProfiles.userId, users.id)).where(eq(users.id, userId)).limit(1)
   if (!user) throw new Error('Account not found.')
 
   let removedPathnames: string[] = []
@@ -725,6 +768,7 @@ export async function deleteOwnAccountAction(confirmation: string) {
       ...privateConversationAttachments.map((attachment) => attachment.pathname),
       ...ownedStatuses.map((status) => status.pathname).filter((pathname): pathname is string => Boolean(pathname)),
       ...(user.image && isProfilePhotoPathname(user.image, userId) ? [user.image] : []),
+      ...(user.bannerPathname && isProfilePhotoPathname(user.bannerPathname, userId) ? [user.bannerPathname] : []),
     ]))
 
     await tx.delete(messageAttachments).where(eq(messageAttachments.uploadedBy, userId))

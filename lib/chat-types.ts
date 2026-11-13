@@ -1,5 +1,7 @@
 export type Visibility = 'everyone' | 'contacts' | 'nobody'
 export type MessageTimer = 'off' | '24h' | '7d' | '90d'
+export type AppTheme = 'dark' | 'light' | 'central' | 'midnight'
+export type AvatarDecoration = 'minimal' | 'square' | 'halo' | 'orbit' | 'spark'
 
 export type ChatPreferences = {
   lastSeenVisibility: Visibility
@@ -26,6 +28,8 @@ export type ChatUser = {
   email: string
   emailVerified: boolean
   image: string | null
+  bannerImage: string | null
+  avatarDecoration: AvatarDecoration
   about: string
   username: string
   createdAt: string
@@ -44,6 +48,11 @@ export type Contact = {
   name: string
   email: string
   image: string | null
+  bannerImage: string | null
+  avatarDecoration: AvatarDecoration
+  createdAt: string
+  isAdmin: boolean
+  conversationIds: string[]
   about: string
   username: string
   isOnline: boolean
@@ -54,6 +63,7 @@ export type ConversationPreview = {
   id: string
   name: string
   image: string | null
+  avatarDecoration: AvatarDecoration
   isGroup: boolean
   lastMessage: string | null
   lastMessageAt: string
@@ -87,6 +97,7 @@ export type StatusGroup = {
   userId: string
   name: string
   image: string | null
+  avatarDecoration: AvatarDecoration
   isMe: boolean
   items: StatusItem[]
 }

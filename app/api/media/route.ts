@@ -40,15 +40,21 @@ async function findAuthorizedMedia(pathname: string, userId: string) {
       .leftJoin(userProfiles, eq(userProfiles.userId, users.id))
       .where(eq(users.image, pathname))
       .limit(1)
-    if (!profilePhoto) return null
+    const [profileBanner] = profilePhoto ? [] : await db
+      .select({ userId: userProfiles.userId, visibility: userProfiles.profilePhotoVisibility })
+      .from(userProfiles)
+      .where(eq(userProfiles.bannerPathname, pathname))
+      .limit(1)
+    const profileMedia = profilePhoto ? { ...profilePhoto, filename: 'profile-photo' } : profileBanner ? { ...profileBanner, filename: 'profile-banner' } : null
+    if (!profileMedia) return null
 
-    if (profilePhoto.userId !== userId) {
-      if (profilePhoto.visibility === 'nobody') return null
-      if (profilePhoto.visibility === 'contacts') {
+    if (profileMedia.userId !== userId) {
+      if (profileMedia.visibility === 'nobody') return null
+      if (profileMedia.visibility === 'contacts') {
         const ownerMemberships = await db
           .select({ conversationId: conversationMembers.conversationId })
           .from(conversationMembers)
-          .where(eq(conversationMembers.userId, profilePhoto.userId))
+          .where(eq(conversationMembers.userId, profileMedia.userId))
           .limit(100)
         const conversationIds = ownerMemberships.map((membership) => membership.conversationId)
         if (!conversationIds.length) return null
@@ -62,7 +68,7 @@ async function findAuthorizedMedia(pathname: string, userId: string) {
       }
     }
 
-    return { filename: 'profile-photo', contentType: '' }
+    return { filename: profileMedia.filename, contentType: '' }
   }
 
   if (status.userId !== userId) {
