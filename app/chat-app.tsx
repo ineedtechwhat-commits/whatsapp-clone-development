@@ -1,0 +1,683 @@
+'use client'
+
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { upload } from '@vercel/blob/client'
+import useSWR from 'swr'
+import {
+  ArrowLeft,
+  CheckCheck,
+  CircleDot,
+  MessageCircle,
+  MoreHorizontal,
+  Paperclip,
+  ImagePlus,
+  Moon,
+  Pencil,
+  Plus,
+  Search,
+  Send,
+  Settings2,
+  Smile,
+  Sun,
+  Trash2,
+  UsersRound,
+  X,
+} from 'lucide-react'
+import { useRouter } from 'next/navigation'
+import { authClient } from '@/lib/auth-client'
+import { BrandMark } from '@/components/brand-mark'
+import {
+  createConversationAction,
+  createGroupConversationAction,
+  createMediaStatusAction,
+  createStatusAction,
+  deleteMessageAction,
+  editMessageAction,
+  sendMessageAction,
+  sendMessageWithAttachmentsAction,
+  discardMediaUploadsAction,
+} from '@/app/actions/chat'
+import { SettingsPanel } from '@/components/settings-panel'
+import { formatFileSize, MessageAttachmentCard, StatusMediaPreview } from '@/components/chat-media'
+import type { ChatMessage, ConversationPreview, StatusGroup, WorkspaceData } from '@/lib/chat-types'
+import { MAX_CHAT_ATTACHMENTS, MAX_CHAT_FILE_BYTES, MAX_STATUS_FILE_BYTES } from '@/lib/media'
+
+type View = 'chats' | 'status'
+type Dialog = 'new-chat' | 'new-group' | 'new-status' | 'settings' | null
+
+type SettingsTab = 'profile' | 'account' | 'privacy' | 'chats' | 'help'
+
+const messageEmojis = ['🙂', '😄', '😂', '🥹', '😉', '😊', '😍', '❤️', '👍', '👏', '🙌', '🙏', '🎉', '✨', '🔥', '👀', '✅', '🫶']
+
+const fetcher = async (url: string): Promise<ChatMessage[]> => {
+  const response = await fetch(url, { credentials: 'same-origin' })
+  if (!response.ok) throw new Error('Unable to load messages')
+  return response.json()
+}
+
+function initials(name: string) {
+  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || '?'
+}
+
+function Avatar({ name, image, size = 'regular', ring = false, group = false }: { name: string; image: string | null; size?: 'regular' | 'large'; ring?: boolean; group?: boolean }) {
+  return (
+    <span className={`avatar avatar-${size}${ring ? ' avatar-ring' : ''}${group ? ' avatar-group' : ''}`} aria-hidden="true">
+      {group ? <UsersRound /> : image ? <img src={image} alt="" loading="lazy" referrerPolicy="no-referrer" /> : <span>{initials(name)}</span>}
+    </span>
+  )
+}
+
+function timeLabel(value: string) {
+  const date = new Date(value)
+  const now = new Date()
+  if (date.toDateString() === now.toDateString()) {
+    return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(date)
+  }
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date)
+}
+
+function ChatRow({ conversation, active, onSelect }: { conversation: ConversationPreview; active: boolean; onSelect: () => void }) {
+  return (
+    <button className={`chat-row${active ? ' is-active' : ''}`} type="button" onClick={onSelect}>
+      <Avatar name={conversation.name} image={conversation.image} group={conversation.isGroup} />
+      <span className="chat-row-copy">
+        <span className="chat-row-top"><strong>{conversation.name}</strong><time>{timeLabel(conversation.lastMessageAt)}</time></span>
+        <span className="chat-row-bottom">
+          <span className="last-message">{conversation.lastMessage ?? 'Start the conversation'}</span>
+          {conversation.unreadCount > 0 ? <span className="unread-count">{conversation.unreadCount > 99 ? '99+' : conversation.unreadCount}</span> : null}
+        </span>
+      </span>
+    </button>
+  )
+}
+
+function StatusRow({ group, onSelect, onAdd }: { group: StatusGroup; onSelect: () => void; onAdd?: () => void }) {
+  return (
+    <button className="status-row" type="button" onClick={group.isMe && !group.items.length ? onAdd : onSelect}>
+      <span className="status-avatar-wrap">
+        <Avatar name={group.name} image={group.image} ring={group.items.length > 0} />
+        {group.isMe && !group.items.length ? <span className="status-add">+</span> : null}
+      </span>
+      <span className="status-row-copy">
+        <strong>{group.isMe ? 'My status' : group.name}</strong>
+        <span>{group.items.length ? `${group.items.length} update${group.items.length === 1 ? '' : 's'}` : 'Tap to add a status'}</span>
+      </span>
+      {group.isMe && onAdd ? <span className="status-quick-add" onClick={(event) => { event.stopPropagation(); onAdd() }} aria-label="Add a status">+</span> : null}
+    </button>
+  )
+}
+
+export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceData; initialTheme: 'dark' | 'light' }) {
+  const router = useRouter()
+  const [theme, setTheme] = useState<'dark' | 'light'>(initialTheme)
+  const [view, setView] = useState<View>('chats')
+  const [dialog, setDialog] = useState<Dialog>(null)
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('profile')
+  const [selectedId, setSelectedId] = useState<string | null>(initialData.conversations[0]?.id ?? null)
+  const [selectedStatusId, setSelectedStatusId] = useState<string | null>(null)
+  const [filter, setFilter] = useState('')
+  const [chatFilter, setChatFilter] = useState<'all' | 'unread' | 'groups'>('all')
+  const [messageMenuId, setMessageMenuId] = useState<string | null>(null)
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState('')
+  const [draft, setDraft] = useState('')
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([])
+  const [statusMediaFile, setStatusMediaFile] = useState<File | null>(null)
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const [mobileThreadOpen, setMobileThreadOpen] = useState(Boolean(initialData.conversations[0]))
+  const tailRef = useRef<HTMLDivElement>(null)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
+  const attachmentInputRef = useRef<HTMLInputElement>(null)
+
+  const selectedConversation = initialData.conversations.find((chat) => chat.id === selectedId) ?? null
+  const messageUrl = selectedId ? `/api/conversations/${encodeURIComponent(selectedId)}/messages` : null
+  const { data: messages = [], error: messagesError, mutate: refreshMessages } = useSWR<ChatMessage[]>(messageUrl, fetcher, {
+    refreshInterval: 5000,
+    revalidateOnFocus: true,
+    keepPreviousData: false,
+  })
+
+  const filteredConversations = useMemo(() => {
+    const query = filter.trim().toLowerCase()
+    return initialData.conversations.filter((chat) => {
+      const matchesQuery = !query || chat.name.toLowerCase().includes(query) || chat.lastMessage?.toLowerCase().includes(query)
+      const matchesReadFilter = chatFilter !== 'unread' || chat.unreadCount > 0
+      const matchesType = chatFilter !== 'groups' || chat.isGroup
+      return matchesQuery && matchesReadFilter && matchesType
+    })
+  }, [chatFilter, filter, initialData.conversations])
+
+  useEffect(() => {
+    tailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [messages.length, selectedId])
+
+  function openConversation(conversation: ConversationPreview) {
+    setSelectedId(conversation.id)
+    setMobileThreadOpen(true)
+    setView('chats')
+    setEditingMessageId(null)
+    setEditDraft('')
+    setMessageMenuId(null)
+    setSelectedFiles([])
+    setEmojiPickerOpen(false)
+    setError('')
+  }
+
+  async function submitMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!selectedId || (!draft.trim() && !selectedFiles.length) || pending) return
+    setPending(true)
+    setError('')
+    const uploadedFiles: Array<{ pathname: string; filename: string }> = []
+    try {
+      if (selectedFiles.length) {
+        for (const file of selectedFiles) {
+          const blob = await upload(
+            `users/${initialData.user.id}/messages/${selectedId}/${crypto.randomUUID()}`,
+            file,
+            {
+              access: 'private',
+              handleUploadUrl: '/api/media/upload',
+              clientPayload: JSON.stringify({ purpose: 'message', conversationId: selectedId }),
+              contentType: file.type || 'application/octet-stream',
+            },
+          )
+          uploadedFiles.push({ pathname: blob.pathname, filename: file.name })
+        }
+        await sendMessageWithAttachmentsAction(selectedId, draft, uploadedFiles)
+      } else {
+        await sendMessageAction(selectedId, draft)
+      }
+      setDraft('')
+      setSelectedFiles([])
+      setEmojiPickerOpen(false)
+      await refreshMessages()
+      router.refresh()
+    } catch {
+      if (uploadedFiles.length) await discardMediaUploadsAction(uploadedFiles.map((file) => file.pathname)).catch(() => undefined)
+      setError('Your message could not be sent. Please try again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
+      event.preventDefault()
+      event.currentTarget.form?.requestSubmit()
+    }
+  }
+
+  async function saveMessageEdit(messageId: string) {
+    if (!editDraft.trim() || pending) return
+    setPending(true)
+    setError('')
+    try {
+      await editMessageAction(messageId, editDraft)
+      setEditingMessageId(null)
+      setEditDraft('')
+      await refreshMessages()
+      router.refresh()
+    } catch {
+      setError('Your edit could not be saved. Please try again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function removeMessage(messageId: string) {
+    if (pending || !window.confirm('Delete this message for everyone in the conversation?')) return
+    setPending(true)
+    setError('')
+    try {
+      await deleteMessageAction(messageId)
+      setMessageMenuId(null)
+      await refreshMessages()
+      router.refresh()
+    } catch {
+      setError('This message could not be deleted. Please try again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function submitNewConversation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const form = new FormData(event.currentTarget)
+    const email = String(form.get('email') ?? '')
+    setPending(true)
+    setError('')
+    try {
+      const conversationId = await createConversationAction(email)
+      setSelectedId(conversationId)
+      setMobileThreadOpen(true)
+      setView('chats')
+      setDialog(null)
+      setFilter('')
+      setChatFilter('all')
+      router.refresh()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'We could not start that conversation.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function submitNewGroup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const form = new FormData(event.currentTarget)
+    setPending(true)
+    setError('')
+    try {
+      const conversationId = await createGroupConversationAction(
+        String(form.get('groupName') ?? ''),
+        String(form.get('members') ?? ''),
+      )
+      setSelectedId(conversationId)
+      setMobileThreadOpen(true)
+      setView('chats')
+      setDialog(null)
+      setFilter('')
+      setChatFilter('all')
+      router.refresh()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'We could not create that group.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function submitStatus(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const form = new FormData(event.currentTarget)
+    const caption = String(form.get('caption') ?? '')
+    if (!statusMediaFile && !caption.trim()) {
+      setError('Add a caption or choose a photo or video.')
+      return
+    }
+    setPending(true)
+    setError('')
+    let uploadedPathname = ''
+    try {
+      if (statusMediaFile) {
+        const blob = await upload(
+          `users/${initialData.user.id}/statuses/${crypto.randomUUID()}`,
+          statusMediaFile,
+          {
+            access: 'private',
+            handleUploadUrl: '/api/media/upload',
+            clientPayload: JSON.stringify({ purpose: 'status' }),
+            contentType: statusMediaFile.type || 'application/octet-stream',
+          },
+        )
+        uploadedPathname = blob.pathname
+        await createMediaStatusAction(caption, blob.pathname, statusMediaFile.name)
+      } else {
+        await createStatusAction(caption)
+      }
+      setStatusMediaFile(null)
+      setDialog(null)
+      setSelectedStatusId(initialData.user.id)
+      setView('status')
+      router.refresh()
+    } catch {
+      if (uploadedPathname) await discardMediaUploadsAction([uploadedPathname]).catch(() => undefined)
+      setError('Your status could not be posted. Please try again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  function toggleTheme() {
+    const nextTheme = theme === 'dark' ? 'light' : 'dark'
+    setTheme(nextTheme)
+    document.cookie = `morrow-theme=${nextTheme}; Path=/; Max-Age=31536000; SameSite=Lax`
+  }
+
+  async function signOut() {
+    await authClient.signOut()
+    router.replace('/sign-in')
+    router.refresh()
+  }
+
+  function accountDeleted() {
+    setDialog(null)
+    router.replace('/sign-in')
+    router.refresh()
+  }
+
+  function insertEmoji(emoji: string) {
+    const textarea = composerRef.current
+    const start = textarea?.selectionStart ?? draft.length
+    const end = textarea?.selectionEnd ?? draft.length
+    const nextDraft = `${draft.slice(0, start)}${emoji}${draft.slice(end)}`
+    setDraft(nextDraft)
+    setEmojiPickerOpen(false)
+    requestAnimationFrame(() => {
+      textarea?.focus()
+      textarea?.setSelectionRange(start + emoji.length, start + emoji.length)
+    })
+  }
+
+  const activeStatus = initialData.statuses.find((group) => group.userId === selectedStatusId) ?? null
+
+  return (
+    <main className={`messenger-shell${mobileThreadOpen ? ' thread-open' : ''}`} data-theme={theme}>
+      <nav className="app-rail" aria-label="Main navigation">
+        <a className="rail-brand" href="/" aria-label="F.R.I.E.N.D.S home"><BrandMark className="brand-mark" /></a>
+        <div className="rail-nav">
+          <button className={`rail-button${view === 'chats' ? ' selected' : ''}`} type="button" aria-label="Chats" aria-pressed={view === 'chats'} onClick={() => setView('chats')}>
+            <MessageCircle aria-hidden="true" /><span className="rail-tooltip">Chats</span>
+          </button>
+          <button className={`rail-button${view === 'status' ? ' selected' : ''}`} type="button" aria-label="Status updates" aria-pressed={view === 'status'} onClick={() => setView('status')}>
+            <CircleDot aria-hidden="true" /><span className="rail-tooltip">Updates</span>
+          </button>
+        </div>
+        <div className="rail-bottom">
+          <button className="rail-button theme-toggle" type="button" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-pressed={theme === 'dark'} onClick={toggleTheme}>
+            {theme === 'dark' ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
+            <span className="rail-tooltip">Switch to {theme === 'dark' ? 'light' : 'dark'} mode</span>
+          </button>
+          <button className="rail-button" type="button" aria-label="Open settings" onClick={() => { setSettingsTab('privacy'); setDialog('settings') }}>
+            <Settings2 aria-hidden="true" /><span className="rail-tooltip">Settings</span>
+          </button>
+          <button className="rail-button" type="button" aria-label="Edit your profile" onClick={() => { setSettingsTab('profile'); setDialog('settings') }}>
+            <Avatar name={initialData.user.name} image={initialData.user.image} size="regular" />
+          </button>
+        </div>
+      </nav>
+
+      <aside className="inbox-panel" aria-label={view === 'chats' ? 'Chats' : 'Status updates'}>
+        <header className="inbox-header">
+          <div className="inbox-title-row">
+            <div>
+              <p className="inbox-kicker">YOUR SPACE</p>
+              <h1>{view === 'chats' ? 'Messages' : 'Updates'}</h1>
+            </div>
+            <button className="icon-button new-chat-button" type="button" aria-label="Start a new conversation" onClick={() => { setError(''); setDialog('new-chat') }}>
+              <Plus aria-hidden="true" />
+            </button>
+          </div>
+          <label className="search-box">
+            <Search aria-hidden="true" />
+            <span className="sr-only">Search {view === 'chats' ? 'chats' : 'updates'}</span>
+            <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder={view === 'chats' ? 'Search or start a new chat' : 'Find an update'} />
+            {filter ? <button type="button" className="search-clear" aria-label="Clear search" onClick={() => setFilter('')}><X aria-hidden="true" /></button> : null}
+          </label>
+          {view === 'chats' ? (
+            <div className="inbox-filters" aria-label="Conversation filter">
+              <button className={`filter-pill${chatFilter === 'all' ? ' active' : ''}`} type="button" aria-pressed={chatFilter === 'all'} onClick={() => setChatFilter('all')}>All</button>
+              <button className={`filter-pill${chatFilter === 'unread' ? ' active' : ''}`} type="button" aria-pressed={chatFilter === 'unread'} onClick={() => setChatFilter('unread')}>Unread</button>
+              <button className={`filter-pill${chatFilter === 'groups' ? ' active' : ''}`} type="button" aria-pressed={chatFilter === 'groups'} onClick={() => setChatFilter('groups')}>Groups</button>
+            </div>
+          ) : null}
+        </header>
+
+        {view === 'chats' ? (
+          <div className="inbox-list" role="list" aria-label="Conversation list">
+            {filteredConversations.length ? filteredConversations.map((conversation) => (
+              <div role="listitem" key={conversation.id}>
+                <ChatRow conversation={conversation} active={selectedId === conversation.id} onSelect={() => openConversation(conversation)} />
+              </div>
+            )) : (
+              <div className="list-empty">
+                <span className="empty-icon"><MessageCircle aria-hidden="true" /></span>
+                <strong>{filter ? 'No matches found' : 'Your conversations start here'}</strong>
+                <p>{filter ? 'Try another name or message.' : 'Find someone you know and say hello.'}</p>
+                {!filter ? <button className="text-action" type="button" onClick={() => setDialog('new-chat')}>Start a conversation <span aria-hidden="true">→</span></button> : null}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="inbox-list status-list" role="list" aria-label="Status updates">
+            <div className="status-section-label">TODAY</div>
+            <StatusRow group={{ userId: initialData.user.id, name: 'You', image: initialData.user.image, isMe: true, items: initialData.statuses.find((group) => group.isMe)?.items ?? [] }} onSelect={() => setSelectedStatusId(initialData.user.id)} onAdd={() => { setError(''); setStatusMediaFile(null); setDialog('new-status') }} />
+            {initialData.statuses.filter((group) => !group.isMe && (!filter || group.name.toLowerCase().includes(filter.toLowerCase()))).map((group) => (
+              <StatusRow key={group.userId} group={group} onSelect={() => setSelectedStatusId(group.userId)} />
+            ))}
+            {!initialData.statuses.some((group) => !group.isMe) ? <p className="status-empty-note">Updates from people you chat with will appear here.</p> : null}
+            <button className="text-action status-compose-link" type="button" onClick={() => { setError(''); setStatusMediaFile(null); setDialog('new-status') }}>Share a new update <span aria-hidden="true">+</span></button>
+          </div>
+        )}
+        <footer className="inbox-footer"><span className="online-dot" /> Your conversations are private</footer>
+      </aside>
+
+      {view === 'chats' ? (
+        <section className={`conversation-panel${selectedConversation ? '' : ' conversation-empty'}`} aria-label="Conversation">
+          {selectedConversation ? (
+            <>
+              <header className="conversation-header">
+                <button className="back-button" type="button" aria-label="Back to conversations" onClick={() => setMobileThreadOpen(false)}><ArrowLeft aria-hidden="true" /></button>
+                <Avatar name={selectedConversation.name} image={selectedConversation.image} group={selectedConversation.isGroup} />
+                <div className="conversation-heading"><h2>{selectedConversation.name}</h2><p>{selectedConversation.isGroup ? `Group · ${selectedConversation.participantCount} members` : 'Conversation'}</p></div>
+              </header>
+              <div className="message-history" role="log" aria-live="polite" aria-label={`Messages with ${selectedConversation.name}`}>
+                <div className="history-note"><span>Today</span></div>
+                {messagesError ? <div className="message-load-error">Messages could not be refreshed. Your conversation is still available.</div> : null}
+                {messages.map((message) => {
+                  const mine = message.senderId === initialData.user.id
+                  const editing = editingMessageId === message.id
+                  return (
+                    <article className={`message-line${mine ? ' message-mine' : ''}`} key={message.id}>
+                      {!mine ? <Avatar name={message.senderName} image={message.senderImage} size="regular" /> : null}
+                      <div className={`message-content${mine ? ' message-content-mine' : ''}`}>
+                        {!mine && selectedConversation.isGroup ? <span className="message-sender">{message.senderName}</span> : null}
+                        {editing ? (
+                          <form className="message-edit-form" onSubmit={(event) => { event.preventDefault(); void saveMessageEdit(message.id) }}>
+                            <label className="sr-only" htmlFor={`edit-${message.id}`}>Edit message</label>
+                            <textarea id={`edit-${message.id}`} value={editDraft} onChange={(event) => setEditDraft(event.target.value)} rows={3} maxLength={4000} autoFocus />
+                            <div><button type="button" onClick={() => { setEditingMessageId(null); setEditDraft('') }}>Cancel</button><button type="submit" disabled={pending || !editDraft.trim()}>Save</button></div>
+                          </form>
+                        ) : (
+                          <div className="message-bubble">
+                            {message.body ? <p>{message.body}</p> : null}
+                            {message.attachments.length ? <div className="message-attachments">{message.attachments.map((attachment) => <MessageAttachmentCard key={attachment.id} attachment={attachment} />)}</div> : null}
+                            <div className="message-meta"><time>{timeLabel(message.createdAt)}{message.editedAt ? <span className="edited-label"> · edited</span> : null}</time>{mine && (selectedConversation.isGroup || initialData.preferences.readReceipts) ? <CheckCheck className="message-check" aria-label="Sent" /> : null}</div>
+                          </div>
+                        )}
+                        {mine && !editing ? (
+                          <div className="message-options">
+                            <button className="message-more-button" type="button" aria-label={`More options for your message`} aria-expanded={messageMenuId === message.id} onClick={() => setMessageMenuId((current) => current === message.id ? null : message.id)}><MoreHorizontal aria-hidden="true" /></button>
+                            {messageMenuId === message.id ? (
+                              <div className="message-menu" role="group" aria-label="Message actions">
+                                <button type="button" onClick={() => { setEditingMessageId(message.id); setEditDraft(message.body); setMessageMenuId(null) }}><Pencil aria-hidden="true" /> Edit</button>
+                                <button type="button" onClick={() => void removeMessage(message.id)}><Trash2 aria-hidden="true" /> Delete for everyone</button>
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    </article>
+                  )
+                })}
+                {!messages.length && !messagesError ? <div className="first-message-note">This is the beginning of your conversation. Say hello.</div> : null}
+                <div ref={tailRef} />
+              </div>
+              <form className="composer" onSubmit={submitMessage}>
+                {selectedFiles.length ? (
+                  <div className="attachment-queue" aria-label="Files attached to your message">
+                    {selectedFiles.map((file, index) => (
+                      <div className="attachment-queue-item" key={`${file.name}-${index}`}>
+                        <span><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span>
+                        <button type="button" aria-label={`Remove ${file.name}`} onClick={() => setSelectedFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X aria-hidden="true" /></button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="composer-row">
+                  <input
+                    ref={attachmentInputRef}
+                    className="sr-only"
+                    type="file"
+                    multiple
+                    onChange={(event) => {
+                      const pickedFiles = Array.from(event.currentTarget.files ?? [])
+                      event.currentTarget.value = ''
+                      if (!pickedFiles.length) return
+                      if (pickedFiles.some((file) => file.size > MAX_CHAT_FILE_BYTES)) {
+                        setError('Each attachment must be 20 MB or smaller.')
+                        return
+                      }
+                      if (selectedFiles.length + pickedFiles.length > MAX_CHAT_ATTACHMENTS) {
+                        setError(`Send up to ${MAX_CHAT_ATTACHMENTS} files at a time.`)
+                        return
+                      }
+                      setError('')
+                      setSelectedFiles((current) => [...current, ...pickedFiles])
+                    }}
+                  />
+                  <button className="composer-attachment-trigger" type="button" aria-label="Attach files" onClick={() => attachmentInputRef.current?.click()}><Paperclip aria-hidden="true" /></button>
+                  <div className="emoji-picker-wrap">
+                    <button className="emoji-trigger" type="button" aria-label="Add an emoji" aria-expanded={emojiPickerOpen} onClick={() => setEmojiPickerOpen((open) => !open)}><Smile aria-hidden="true" /></button>
+                    {emojiPickerOpen ? (
+                      <div className="emoji-picker" role="group" aria-label="Choose an emoji">
+                        {messageEmojis.map((emoji) => <button key={emoji} type="button" aria-label={`Insert ${emoji}`} onClick={() => insertEmoji(emoji)}>{emoji}</button>)}
+                      </div>
+                    ) : null}
+                  </div>
+                  <label className="composer-field" htmlFor="message-composer">
+                    <span className="sr-only">Write a message</span>
+                    <textarea id="message-composer" ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} placeholder="Write a message" rows={1} maxLength={4000} />
+                  </label>
+                  <button className="send-button" type="submit" aria-label="Send message" disabled={(!draft.trim() && !selectedFiles.length) || pending}>
+                    <Send aria-hidden="true" />
+                  </button>
+                </div>
+              </form>
+              {error ? <p className="inline-error" role="status">{error}</p> : null}
+            </>
+          ) : (
+            <WelcomePanel onNewChat={() => { setError(''); setDialog('new-chat') }} />
+          )}
+        </section>
+      ) : (
+        <section className="conversation-panel status-detail-panel" aria-label="Status details">
+          <header className="conversation-header status-detail-header">
+            <span className="header-avatar"><CircleDot aria-hidden="true" /></span>
+            <div className="conversation-heading"><h2>Daily moments</h2><p>Short updates from your people</p></div>
+            <button className="solid-small-button" type="button" onClick={() => { setError(''); setStatusMediaFile(null); setDialog('new-status') }}><Plus aria-hidden="true" /> New update</button>
+          </header>
+          <div className="status-detail-content">
+            {activeStatus ? (
+              <article className="status-card">
+                <div className="status-card-person"><Avatar name={activeStatus.name} image={activeStatus.image} ring /><div><strong>{activeStatus.name}</strong><span>{activeStatus.items.length} update{activeStatus.items.length === 1 ? '' : 's'}</span></div></div>
+                {activeStatus.items.map((item) => (
+                  <div className="status-story" key={item.id}>
+                    <StatusMediaPreview item={item} />
+                    {item.caption ? <p>{item.caption}</p> : null}
+                    <time>Expires {new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(item.expiresAt))}</time>
+                  </div>
+                ))}
+              </article>
+            ) : (
+              <div className="welcome-card status-welcome">
+                <span className="welcome-mark"><CircleDot aria-hidden="true" /></span>
+                <p className="eyebrow">A little window into their day</p>
+                <h2>Good things are better shared.</h2>
+                <p>Post a quick update for the people you chat with. Updates disappear after 24 hours.</p>
+                <button className="solid-button" type="button" onClick={() => { setError(''); setStatusMediaFile(null); setDialog('new-status') }}><Plus aria-hidden="true" /> Share an update</button>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {dialog === 'settings' ? (
+        <SettingsPanel
+          user={initialData.user}
+          initialPreferences={initialData.preferences}
+          initialTab={settingsTab}
+          theme={theme}
+          onClose={() => setDialog(null)}
+          onThemeToggle={toggleTheme}
+          onSignOut={signOut}
+          onAccountDeleted={accountDeleted}
+        />
+      ) : dialog ? (
+        <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setDialog(null); setError('') } }}>
+          <section className="dialog-card" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+            <header className="dialog-header"><div><p className="inbox-kicker">MORROW</p><h2 id="dialog-title">{dialog === 'new-chat' ? 'Start a conversation' : dialog === 'new-group' ? 'Create a group' : 'Share an update'}</h2></div><button className="icon-button" type="button" aria-label="Close" onClick={() => { setDialog(null); setError('') }}><X aria-hidden="true" /></button></header>
+            {dialog === 'new-chat' ? (
+              <form className="dialog-form" onSubmit={submitNewConversation}>
+                <label htmlFor="recipient-email">Their account email</label>
+                <input id="recipient-email" name="email" type="email" autoComplete="email" placeholder="name@example.com" required maxLength={254} />
+                <p className="dialog-hint">They need a F.R.I.E.N.D.S account before you can message them.</p>
+                {error ? <p className="form-error" role="alert">{error}</p> : null}
+                <button className="solid-button dialog-submit" type="submit" disabled={pending}>{pending ? 'Starting…' : 'Continue'}</button>
+                <button className="text-action group-switch-link" type="button" onClick={() => { setError(''); setDialog('new-group') }}><UsersRound aria-hidden="true" /> Create a group instead</button>
+              </form>
+            ) : null}
+            {dialog === 'new-group' ? (
+              <form className="dialog-form" onSubmit={submitNewGroup}>
+                <label htmlFor="group-name">Group name</label>
+                <input id="group-name" name="groupName" type="text" autoComplete="off" placeholder="Weekend plans" required minLength={2} maxLength={80} />
+                <label htmlFor="group-members">Member email addresses</label>
+                <textarea id="group-members" name="members" rows={4} placeholder="alex@example.com, sam@example.com" required />
+                <p className="dialog-hint">Add up to 99 people who already have an account. Separate addresses with commas or spaces.</p>
+                {error ? <p className="form-error" role="alert">{error}</p> : null}
+                <div className="group-form-actions">
+                  <button className="text-action" type="button" onClick={() => { setError(''); setDialog('new-chat') }}>Back</button>
+                  <button className="solid-button" type="submit" disabled={pending}>{pending ? 'Creating…' : 'Create group'}</button>
+                </div>
+              </form>
+            ) : null}
+            {dialog === 'new-status' ? (
+              <form className="dialog-form" onSubmit={submitStatus}>
+                <label htmlFor="status-caption">Caption <span>(optional)</span></label>
+                <textarea id="status-caption" name="caption" rows={3} maxLength={280} placeholder="A small moment from your day…" />
+                <label htmlFor="status-media">Photo or video</label>
+                <input
+                  id="status-media"
+                  className="status-file-input"
+                  type="file"
+                  accept="image/*,video/*"
+                  onChange={(event) => {
+                    const file = event.currentTarget.files?.[0] ?? null
+                    event.currentTarget.value = ''
+                    if (file && file.size > MAX_STATUS_FILE_BYTES) {
+                      setError('Status photos and videos must be 50 MB or smaller.')
+                      return
+                    }
+                    if (file && !file.type.startsWith('image/') && !file.type.startsWith('video/')) {
+                      setError('Choose a photo or video file.')
+                      return
+                    }
+                    setError('')
+                    setStatusMediaFile(file)
+                  }}
+                />
+                {statusMediaFile ? (
+                  <div className="status-file-selection">
+                    <span><ImagePlus aria-hidden="true" /><strong>{statusMediaFile.name}</strong><small>{formatFileSize(statusMediaFile.size)}</small></span>
+                    <button type="button" aria-label="Remove selected status media" onClick={() => setStatusMediaFile(null)}><X aria-hidden="true" /></button>
+                  </div>
+                ) : null}
+                <p className="dialog-hint">Visible to people you have a conversation with. Photos and videos up to 50 MB disappear after 24 hours.</p>
+                {error ? <p className="form-error" role="alert">{error}</p> : null}
+                <button className="solid-button dialog-submit" type="submit" disabled={pending}>{pending ? 'Sharing…' : 'Share update'}</button>
+              </form>
+            ) : null}
+
+          </section>
+        </div>
+      ) : null}
+    </main>
+  )
+}
+
+function WelcomePanel({ onNewChat }: { onNewChat: () => void }) {
+  return (
+    <div className="welcome-panel">
+      <div className="welcome-card">
+        <span className="welcome-mark"><MessageCircle aria-hidden="true" /></span>
+        <p className="eyebrow">A softer kind of inbox</p>
+        <h2>Make room for a real conversation.</h2>
+        <p>Pick up where you left off, or start something new with someone you know.</p>
+        <button className="solid-button" type="button" onClick={onNewChat}><Plus aria-hidden="true" /> Start a conversation</button>
+      </div>
+      <div className="welcome-assurance"><Settings2 aria-hidden="true" /> Your profile and conversations are tied to your Google account.</div>
+    </div>
+  )
+}
