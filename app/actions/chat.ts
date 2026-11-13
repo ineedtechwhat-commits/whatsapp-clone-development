@@ -2,7 +2,7 @@
 
 import { del, head } from '@vercel/blob'
 import { randomUUID } from 'node:crypto'
-import { and, eq, inArray, isNull, ne } from 'drizzle-orm'
+import { and, asc, eq, inArray, isNull, ne, or } from 'drizzle-orm'
 import { db } from '@/lib/db'
 import {
   accounts,
@@ -15,6 +15,11 @@ import {
   userProfiles,
   users,
   verifications,
+  messageReactions,
+  conversationTyping,
+  notifications,
+  blockedUsers,
+  groupInvitations,
 } from '@/lib/db/schema'
 import { getSessionUser } from '@/lib/auth-session'
 import { isAdminUserId } from '@/lib/admin-auth'
@@ -25,6 +30,54 @@ async function requireUserId() {
   const user = await getSessionUser()
   if (!user) throw new Error('Unauthorized')
   return user.id
+}
+
+async function notifyMessageRecipients(conversationId: string, senderId: string, body: string) {
+  const [conversation, sender] = await Promise.all([
+    db.select({ title: conversations.title, isGroup: conversations.isGroup }).from(conversations).where(eq(conversations.id, conversationId)).limit(1),
+    db.select({ name: users.name }).from(users).where(eq(users.id, senderId)).limit(1),
+  ])
+  const members = await db.select({ userId: conversationMembers.userId, username: userProfiles.username, notifyMessages: userProfiles.notifyMessages, notifyGroupMessages: userProfiles.notifyGroupMessages, notifyMentions: userProfiles.notifyMentions })
+    .from(conversationMembers)
+    .leftJoin(userProfiles, eq(userProfiles.userId, conversationMembers.userId))
+    .where(and(eq(conversationMembers.conversationId, conversationId), ne(conversationMembers.userId, senderId)))
+  const mutedPairs = members.length
+    ? await db.select({ blockerId: blockedUsers.blockerId, blockedUserId: blockedUsers.blockedUserId }).from(blockedUsers)
+      .where(or(
+        and(eq(blockedUsers.blockerId, senderId), inArray(blockedUsers.blockedUserId, members.map((member) => member.userId))),
+        and(eq(blockedUsers.blockedUserId, senderId), inArray(blockedUsers.blockerId, members.map((member) => member.userId))),
+      ))
+    : []
+  const blockedIds = new Set(mutedPairs.flatMap((pair) => [pair.blockerId, pair.blockedUserId]))
+  const group = conversation[0]?.isGroup ?? false
+  const mentions = new Set(Array.from(body.matchAll(/@([a-zA-Z0-9_]{1,24})/g), (match) => match[1].toLowerCase()))
+  const rows = members.flatMap((member) => {
+    if (blockedIds.has(member.userId)) return []
+    const mentioned = Boolean(member.username && mentions.has(member.username.toLowerCase()))
+    if (mentioned && member.notifyMentions !== false) return [{
+      id: randomUUID(), userId: member.userId, type: 'mention', actorUserId: senderId, conversationId,
+      title: 'You were mentioned', body: body.slice(0, 180),
+    }]
+    if (group ? member.notifyGroupMessages === false : member.notifyMessages === false) return []
+    return [{
+      id: randomUUID(), userId: member.userId, type: group ? 'group_message' : 'message', actorUserId: senderId,
+      conversationId, title: group ? conversation[0]?.title || 'New group message' : sender[0]?.name || 'New message', body: body.slice(0, 180),
+    }]
+  })
+  if (rows.length) await db.insert(notifications).values(rows)
+}
+
+async function ensureConversationNotBlocked(conversationId: string, userId: string) {
+  const [conversation] = await db.select({ isGroup: conversations.isGroup }).from(conversations).where(eq(conversations.id, conversationId)).limit(1)
+  if (conversation?.isGroup) return
+  const others = await db.select({ userId: conversationMembers.userId }).from(conversationMembers)
+    .where(and(eq(conversationMembers.conversationId, conversationId), ne(conversationMembers.userId, userId)))
+  if (!others.length) return
+  const [blocked] = await db.select({ id: blockedUsers.id }).from(blockedUsers).where(or(
+    and(eq(blockedUsers.blockerId, userId), inArray(blockedUsers.blockedUserId, others.map((item) => item.userId))),
+    and(eq(blockedUsers.blockedUserId, userId), inArray(blockedUsers.blockerId, others.map((item) => item.userId))),
+  )).limit(1)
+  if (blocked) throw new Error('You cannot send messages in this conversation.')
 }
 
 export async function createConversationAction(emailInput: string) {
@@ -38,6 +91,11 @@ export async function createConversationAction(emailInput: string) {
   if (!recipient || recipient.id === userId) {
     throw new Error('We could not start that conversation. Check the email address and try again.')
   }
+  const [block] = await db.select({ id: blockedUsers.id }).from(blockedUsers).where(or(
+    and(eq(blockedUsers.blockerId, userId), eq(blockedUsers.blockedUserId, recipient.id)),
+    and(eq(blockedUsers.blockerId, recipient.id), eq(blockedUsers.blockedUserId, userId)),
+  )).limit(1)
+  if (block) throw new Error('This conversation is unavailable.')
 
   const existingMemberships = await db
     .select({ conversationId: conversationMembers.conversationId })
@@ -117,8 +175,8 @@ export async function createGroupConversationAction(titleInput: string, memberEm
   await db.transaction(async (tx) => {
     await tx.insert(conversations).values({ id: conversationId, createdBy: userId, title, isGroup: true })
     await tx.insert(conversationMembers).values([
-      { id: randomUUID(), conversationId, userId },
-      ...recipients.map((recipient) => ({ id: randomUUID(), conversationId, userId: recipient.id })),
+      { id: randomUUID(), conversationId, userId, role: 'admin' },
+      ...recipients.map((recipient) => ({ id: randomUUID(), conversationId, userId: recipient.id, role: 'member' })),
     ])
   })
 
@@ -138,6 +196,7 @@ export async function sendMessageAction(conversationId: string, bodyInput: strin
     .where(and(eq(conversationMembers.conversationId, conversation), eq(conversationMembers.userId, userId)))
     .limit(1)
   if (!membership) throw new Error('Conversation not found.')
+  await ensureConversationNotBlocked(conversation, userId)
 
   const [profile] = await db
     .select({ defaultMessageTimer: userProfiles.defaultMessageTimer })
@@ -163,6 +222,8 @@ export async function sendMessageAction(conversationId: string, bodyInput: strin
     })
     await tx.update(conversations).set({ updatedAt: now }).where(eq(conversations.id, conversation))
   })
+  await notifyMessageRecipients(conversation, userId, body).catch(() => undefined)
+  await db.delete(conversationTyping).where(and(eq(conversationTyping.conversationId, conversation), eq(conversationTyping.userId, userId)))
 }
 
 type UploadedAttachmentInput = {
@@ -189,6 +250,7 @@ export async function sendMessageWithAttachmentsAction(
     .where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, userId)))
     .limit(1)
   if (!membership) throw new Error('Conversation not found.')
+  await ensureConversationNotBlocked(conversationId, userId)
 
   const expectedPrefix = `users/${userId}/messages/${conversationId}/`
   const seenPathnames = new Set<string>()
@@ -256,6 +318,8 @@ export async function sendMessageWithAttachmentsAction(
     if (verifiedFiles.length) await del(verifiedFiles.map((file) => file.pathname)).catch(() => undefined)
     throw new Error('Your message could not be sent. Please try again.')
   }
+  await notifyMessageRecipients(conversationId, userId, body || fallbackBody).catch(() => undefined)
+  await db.delete(conversationTyping).where(and(eq(conversationTyping.conversationId, conversationId), eq(conversationTyping.userId, userId)))
 }
 
 export async function editMessageAction(messageIdInput: string, bodyInput: string) {
@@ -411,23 +475,29 @@ export async function updateProfilePhotoAction(pathnameInput: string) {
   }
 }
 
-export async function updateProfileAction(nameInput: string, aboutInput: string) {
+export async function updateProfileAction(nameInput: string, aboutInput: string, usernameInput: string) {
   const userId = await requireUserId()
   const isAdmin = await isAdminUserId(userId)
   const name = nameInput.trim().replace(/\s+/g, ' ')
   const about = aboutInput.trim()
+  const username = usernameInput.trim().replace(/^@/, '').toLowerCase()
   if (name.length < 1 || name.length > 100) throw new Error('Name must be between 1 and 100 characters.')
+  if (!/^[a-z0-9_]{3,24}$/.test(username)) throw new Error('Usernames must be 3–24 characters and use letters, numbers, or underscores.')
   if (about.length < 1 || (!isAdmin && about.length > 120)) {
     throw new Error(isAdmin ? 'About text cannot be empty.' : 'About text must be between 1 and 120 characters.')
   }
 
-  await db.transaction(async (tx) => {
-    await tx.update(users).set({ name, updatedAt: new Date() }).where(eq(users.id, userId))
-    await tx.insert(userProfiles).values({ userId, about, updatedAt: new Date() }).onConflictDoUpdate({
-      target: userProfiles.userId,
-      set: { about, updatedAt: new Date() },
+  try {
+    await db.transaction(async (tx) => {
+      await tx.update(users).set({ name, updatedAt: new Date() }).where(eq(users.id, userId))
+      await tx.insert(userProfiles).values({ userId, username, about, updatedAt: new Date() }).onConflictDoUpdate({
+        target: userProfiles.userId,
+        set: { username, about, updatedAt: new Date() },
+      })
     })
-  })
+  } catch {
+    throw new Error('That username is already taken. Choose another one.')
+  }
 }
 
 const visibilityChoices: Visibility[] = ['everyone', 'contacts', 'nobody']
@@ -435,7 +505,7 @@ const timerChoices: MessageTimer[] = ['off', '24h', '7d', '90d']
 
 export async function updatePreferencesAction(input: ChatPreferences) {
   const userId = await requireUserId()
-  const preferences = input as Record<keyof ChatPreferences, unknown>
+  const preferences = input as ChatPreferences
   const visibilityFields: Array<keyof Pick<ChatPreferences, 'lastSeenVisibility' | 'profilePhotoVisibility' | 'aboutVisibility' | 'statusVisibility' | 'groupInvitePolicy' | 'callsPrivacy'>> = [
     'lastSeenVisibility', 'profilePhotoVisibility', 'aboutVisibility', 'statusVisibility', 'groupInvitePolicy', 'callsPrivacy',
   ]
@@ -443,10 +513,14 @@ export async function updatePreferencesAction(input: ChatPreferences) {
     throw new Error('Choose a valid privacy option.')
   }
   if (!timerChoices.includes(preferences.defaultMessageTimer as MessageTimer)) throw new Error('Choose a valid message timer.')
-  if (typeof preferences.readReceipts !== 'boolean' || typeof preferences.securityNotifications !== 'boolean') {
+  const booleanFields: Array<keyof ChatPreferences> = ['readReceipts', 'securityNotifications', 'notifyMessages', 'notifyGroupMessages', 'notifyMentions', 'notifyReactions', 'notifyInvitations', 'notifyAnnouncements', 'notificationSound']
+  if (booleanFields.some((field) => typeof preferences[field] !== 'boolean')) {
     throw new Error('Choose valid account preferences.')
   }
 
+  const [profile] = await db.select({ username: userProfiles.username }).from(userProfiles).where(eq(userProfiles.userId, userId)).limit(1)
+  const account = profile ? undefined : (await db.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1))[0]
+  const username = profile?.username ?? `${(account?.email.split('@')[0] ?? 'friend').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 18) || 'friend'}_${userId.slice(-6).toLowerCase()}`
   const values = {
     lastSeenVisibility: preferences.lastSeenVisibility as Visibility,
     profilePhotoVisibility: preferences.profilePhotoVisibility as Visibility,
@@ -457,12 +531,164 @@ export async function updatePreferencesAction(input: ChatPreferences) {
     groupInvitePolicy: preferences.groupInvitePolicy as Visibility,
     callsPrivacy: preferences.callsPrivacy as Visibility,
     securityNotifications: preferences.securityNotifications,
+    notifyMessages: preferences.notifyMessages,
+    notifyGroupMessages: preferences.notifyGroupMessages,
+    notifyMentions: preferences.notifyMentions,
+    notifyReactions: preferences.notifyReactions,
+    notifyInvitations: preferences.notifyInvitations,
+    notifyAnnouncements: preferences.notifyAnnouncements,
+    notificationSound: preferences.notificationSound,
     updatedAt: new Date(),
   }
-  await db.insert(userProfiles).values({ userId, ...values }).onConflictDoUpdate({
+  await db.insert(userProfiles).values({ userId, username, ...values }).onConflictDoUpdate({
     target: userProfiles.userId,
     set: values,
   })
+}
+
+const reactionChoices = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const
+
+export async function toggleMessageReactionAction(messageIdInput: string, emojiInput: string) {
+  const userId = await requireUserId()
+  const messageId = messageIdInput.trim()
+  if (!reactionChoices.includes(emojiInput as typeof reactionChoices[number])) throw new Error('Choose a supported reaction.')
+  const [message] = await db.select({ conversationId: messages.conversationId, senderId: messages.senderId }).from(messages)
+    .where(and(eq(messages.id, messageId), isNull(messages.deletedAt))).limit(1)
+  if (!message) throw new Error('Message not found.')
+  const [membership] = await db.select({ id: conversationMembers.id }).from(conversationMembers)
+    .where(and(eq(conversationMembers.conversationId, message.conversationId), eq(conversationMembers.userId, userId))).limit(1)
+  if (!membership) throw new Error('Message not found.')
+  const [existing] = await db.select({ id: messageReactions.id, emoji: messageReactions.emoji }).from(messageReactions)
+    .where(and(eq(messageReactions.messageId, messageId), eq(messageReactions.userId, userId))).limit(1)
+  if (existing?.emoji === emojiInput) {
+    await db.delete(messageReactions).where(eq(messageReactions.id, existing.id))
+    return
+  }
+  await db.insert(messageReactions).values({ id: randomUUID(), messageId, conversationId: message.conversationId, userId, emoji: emojiInput })
+    .onConflictDoUpdate({ target: [messageReactions.messageId, messageReactions.userId], set: { emoji: emojiInput, createdAt: new Date() } })
+  if (message.senderId !== userId) {
+    const [profile] = await db.select({ notifyReactions: userProfiles.notifyReactions }).from(userProfiles).where(eq(userProfiles.userId, message.senderId)).limit(1)
+    if (profile?.notifyReactions !== false) {
+      await db.insert(notifications).values({ id: randomUUID(), userId: message.senderId, type: 'reaction', actorUserId: userId, conversationId: message.conversationId, messageId, title: 'New reaction', body: `${emojiInput} reaction` })
+    }
+  }
+}
+
+export async function setTypingAction(conversationIdInput: string, isTyping: boolean) {
+  const userId = await requireUserId()
+  const conversationId = conversationIdInput.trim()
+  if (!conversationId || conversationId.length > 80 || typeof isTyping !== 'boolean') return
+  const [membership] = await db.select({ id: conversationMembers.id }).from(conversationMembers)
+    .where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, userId))).limit(1)
+  if (!membership) throw new Error('Conversation not found.')
+  if (!isTyping) {
+    await db.delete(conversationTyping).where(and(eq(conversationTyping.conversationId, conversationId), eq(conversationTyping.userId, userId)))
+    return
+  }
+  await db.insert(conversationTyping).values({ id: randomUUID(), conversationId, userId, expiresAt: new Date(Date.now() + 8_000) })
+    .onConflictDoUpdate({ target: [conversationTyping.conversationId, conversationTyping.userId], set: { expiresAt: new Date(Date.now() + 8_000) } })
+}
+
+export async function updateGroupDetailsAction(conversationIdInput: string, titleInput: string, descriptionInput: string) {
+  const userId = await requireUserId()
+  const conversationId = conversationIdInput.trim()
+  const title = titleInput.trim()
+  const description = descriptionInput.trim()
+  if (title.length < 2 || title.length > 80 || description.length > 280) throw new Error('Use a group name from 2 to 80 characters and a description up to 280 characters.')
+  const [membership] = await db.select({ role: conversationMembers.role }).from(conversationMembers)
+    .innerJoin(conversations, eq(conversations.id, conversationMembers.conversationId))
+    .where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, userId), eq(conversations.isGroup, true))).limit(1)
+  if (membership?.role !== 'admin') throw new Error('Only group admins can update group details.')
+  await db.update(conversations).set({ title, description: description || null, updatedAt: new Date() }).where(eq(conversations.id, conversationId))
+}
+
+export async function removeGroupMemberAction(conversationIdInput: string, targetUserIdInput: string) {
+  const userId = await requireUserId()
+  const conversationId = conversationIdInput.trim()
+  const targetUserId = targetUserIdInput.trim()
+  if (!conversationId || !targetUserId || targetUserId === userId) throw new Error('Choose another group member to remove.')
+  const [membership] = await db.select({ role: conversationMembers.role }).from(conversationMembers)
+    .innerJoin(conversations, eq(conversations.id, conversationMembers.conversationId))
+    .where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, userId), eq(conversations.isGroup, true))).limit(1)
+  if (membership?.role !== 'admin') throw new Error('Only group admins can remove members.')
+  const [target] = await db.select({ role: conversationMembers.role }).from(conversationMembers)
+    .where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, targetUserId))).limit(1)
+  if (!target || target.role === 'admin') throw new Error('That member cannot be removed.')
+  await db.delete(conversationMembers).where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, targetUserId)))
+}
+
+export async function leaveGroupAction(conversationIdInput: string) {
+  const userId = await requireUserId()
+  const conversationId = conversationIdInput.trim()
+  const [membership] = await db.select({ role: conversationMembers.role }).from(conversationMembers)
+    .innerJoin(conversations, eq(conversations.id, conversationMembers.conversationId))
+    .where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, userId), eq(conversations.isGroup, true))).limit(1)
+  if (!membership) throw new Error('Group not found.')
+  await db.transaction(async (tx) => {
+    const remainingMembers = await tx.select({ userId: conversationMembers.userId, role: conversationMembers.role })
+      .from(conversationMembers)
+      .where(and(eq(conversationMembers.conversationId, conversationId), ne(conversationMembers.userId, userId)))
+      .orderBy(asc(conversationMembers.joinedAt))
+    if (!remainingMembers.length) throw new Error('You are the last member. Add another member before leaving.')
+    if (membership.role === 'admin' && !remainingMembers.some((member) => member.role === 'admin')) {
+      await tx.update(conversationMembers).set({ role: 'admin' }).where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, remainingMembers[0].userId)))
+    }
+    await tx.delete(conversationMembers).where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, userId)))
+  })
+}
+
+export async function inviteGroupMemberAction(conversationIdInput: string, emailInput: string) {
+  const userId = await requireUserId()
+  const conversationId = conversationIdInput.trim()
+  const email = emailInput.trim().toLowerCase()
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw new Error('Enter a valid email address.')
+  const [membership] = await db.select({ role: conversationMembers.role }).from(conversationMembers)
+    .innerJoin(conversations, eq(conversations.id, conversationMembers.conversationId))
+    .where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, userId), eq(conversations.isGroup, true))).limit(1)
+  if (membership?.role !== 'admin') throw new Error('Only group admins can invite members.')
+  const [invitee] = await db.select({ id: users.id, name: users.name, policy: userProfiles.groupInvitePolicy }).from(users)
+    .leftJoin(userProfiles, eq(userProfiles.userId, users.id)).where(eq(users.email, email)).limit(1)
+  if (!invitee || invitee.id === userId) throw new Error('We could not find that account.')
+  const [alreadyMember] = await db.select({ id: conversationMembers.id }).from(conversationMembers)
+    .where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, invitee.id))).limit(1)
+  if (alreadyMember) throw new Error('That person is already in this group.')
+  if (invitee.policy === 'nobody') throw new Error('That person does not accept group invitations.')
+  if (invitee.policy === 'contacts') {
+    const sharedDirect = await db.select({ conversationId: conversationMembers.conversationId }).from(conversationMembers)
+      .innerJoin(conversations, eq(conversations.id, conversationMembers.conversationId))
+      .where(and(eq(conversationMembers.userId, userId), eq(conversations.isGroup, false)))
+    if (!sharedDirect.length) throw new Error('That person only accepts invitations from contacts.')
+    const [known] = await db.select({ id: conversationMembers.id }).from(conversationMembers)
+      .where(and(inArray(conversationMembers.conversationId, sharedDirect.map((item) => item.conversationId)), eq(conversationMembers.userId, invitee.id))).limit(1)
+    if (!known) throw new Error('That person only accepts invitations from contacts.')
+  }
+  await db.insert(groupInvitations).values({ id: randomUUID(), conversationId, inviterId: userId, inviteeId: invitee.id })
+    .onConflictDoUpdate({ target: [groupInvitations.conversationId, groupInvitations.inviteeId], set: { inviterId: userId, status: 'pending', respondedAt: null, createdAt: new Date() } })
+  const [profile] = await db.select({ notifyInvitations: userProfiles.notifyInvitations }).from(userProfiles).where(eq(userProfiles.userId, invitee.id)).limit(1)
+  if (profile?.notifyInvitations !== false) await db.insert(notifications).values({ id: randomUUID(), userId: invitee.id, type: 'group_invitation', actorUserId: userId, conversationId, title: 'Group invitation', body: `You were invited to join a group.` })
+}
+
+export async function respondToGroupInvitationAction(invitationIdInput: string, accept: boolean) {
+  const userId = await requireUserId()
+  const invitationId = invitationIdInput.trim()
+  const [invitation] = await db.select().from(groupInvitations).where(and(eq(groupInvitations.id, invitationId), eq(groupInvitations.inviteeId, userId), eq(groupInvitations.status, 'pending'))).limit(1)
+  if (!invitation) throw new Error('Invitation not found or already answered.')
+  await db.transaction(async (tx) => {
+    if (accept) {
+      await tx.insert(conversationMembers).values({ id: randomUUID(), conversationId: invitation.conversationId, userId, role: 'member' }).onConflictDoNothing()
+    }
+    await tx.update(groupInvitations).set({ status: accept ? 'accepted' : 'declined', respondedAt: new Date() }).where(eq(groupInvitations.id, invitationId))
+    await tx.insert(notifications).values({ id: randomUUID(), userId: invitation.inviterId, type: accept ? 'invitation_accepted' : 'invitation_declined', actorUserId: userId, conversationId: invitation.conversationId, title: accept ? 'Invitation accepted' : 'Invitation declined', body: accept ? 'A member joined your group.' : 'A member declined your invitation.' })
+  })
+}
+
+export async function toggleBlockedUserAction(targetUserIdInput: string) {
+  const userId = await requireUserId()
+  const targetUserId = targetUserIdInput.trim()
+  if (!targetUserId || targetUserId === userId || targetUserId.length > 80) throw new Error('Choose a valid account to block.')
+  const [existing] = await db.select({ id: blockedUsers.id }).from(blockedUsers).where(and(eq(blockedUsers.blockerId, userId), eq(blockedUsers.blockedUserId, targetUserId))).limit(1)
+  if (existing) await db.delete(blockedUsers).where(eq(blockedUsers.id, existing.id))
+  else await db.insert(blockedUsers).values({ id: randomUUID(), blockerId: userId, blockedUserId: targetUserId }).onConflictDoNothing()
 }
 
 export async function deleteOwnAccountAction(confirmation: string) {

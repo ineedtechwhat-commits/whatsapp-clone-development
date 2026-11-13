@@ -5,6 +5,7 @@ import { upload } from '@vercel/blob/client'
 import useSWR from 'swr'
 import {
   ArrowLeft,
+  Bell,
   CheckCheck,
   CircleDot,
   Crown,
@@ -38,14 +39,19 @@ import {
   sendMessageAction,
   sendMessageWithAttachmentsAction,
   discardMediaUploadsAction,
+  toggleMessageReactionAction,
+  toggleBlockedUserAction,
+  respondToGroupInvitationAction,
 } from '@/app/actions/chat'
 import { submitMessageReportAction, submitUserReportAction } from '@/app/actions/admin'
 import { SettingsPanel } from '@/components/settings-panel'
+import { GroupManagementDialog } from '@/components/group-management-dialog'
 import { formatFileSize, MessageAttachmentCard, StatusMediaPreview } from '@/components/chat-media'
 import type { ChatMessage, ConversationPreview, StatusGroup, WorkspaceData } from '@/lib/chat-types'
 import { MAX_CHAT_ATTACHMENTS, MAX_CHAT_FILE_BYTES, MAX_STATUS_FILE_BYTES } from '@/lib/media'
 
 type View = 'chats' | 'status'
+type SearchMode = 'chats' | 'messages' | 'people'
 type Dialog = 'new-chat' | 'new-group' | 'new-status' | 'settings' | null
 
 type SettingsTab = 'profile' | 'account' | 'privacy' | 'chats' | 'help'
@@ -55,6 +61,41 @@ const messageEmojis = ['🙂', '😄', '😂', '🥹', '😉', '😊', '😍', '
 const fetcher = async (url: string): Promise<ChatMessage[]> => {
   const response = await fetch(url, { credentials: 'same-origin' })
   if (!response.ok) throw new Error('Unable to load messages')
+  return response.json()
+}
+
+type ChatActivity = { typingNames: string[]; onlineUserIds: string[] }
+type NotificationItem = { id: string; type: string; conversationId: string | null; messageId: string | null; title: string; body: string; readAt: string | null; createdAt: string }
+type GroupInvitation = { id: string; conversationId: string; inviterName: string; groupName: string | null; createdAt: string }
+type PeopleSearchResult = { id: string; name: string; username: string; image: string | null; conversationId: string }
+type MessageSearchResult = { id: string; conversationId: string; senderName: string; snippet: string; createdAt: string }
+
+const peopleSearchFetcher = async (url: string): Promise<PeopleSearchResult[]> => {
+  const response = await fetch(url, { credentials: 'same-origin' })
+  if (!response.ok) throw new Error('Search unavailable')
+  return response.json()
+}
+const messageSearchFetcher = async (url: string): Promise<MessageSearchResult[]> => {
+  const response = await fetch(url, { credentials: 'same-origin' })
+  if (!response.ok) throw new Error('Search unavailable')
+  return response.json()
+}
+
+const groupInvitationFetcher = async (url: string): Promise<GroupInvitation[]> => {
+  const response = await fetch(url, { credentials: 'same-origin' })
+  if (!response.ok) throw new Error('Unable to load group invitations')
+  return response.json()
+}
+
+const activityFetcher = async (url: string): Promise<ChatActivity> => {
+  const response = await fetch(url, { credentials: 'same-origin' })
+  if (!response.ok) throw new Error('Unable to load chat activity')
+  return response.json()
+}
+
+const notificationFetcher = async (url: string): Promise<NotificationItem[]> => {
+  const response = await fetch(url, { credentials: 'same-origin' })
+  if (!response.ok) throw new Error('Unable to load notifications')
   return response.json()
 }
 
@@ -119,6 +160,8 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
   const [selectedId, setSelectedId] = useState<string | null>(initialData.conversations[0]?.id ?? null)
   const [selectedStatusId, setSelectedStatusId] = useState<string | null>(null)
   const [filter, setFilter] = useState('')
+  const [searchMode, setSearchMode] = useState<SearchMode>('chats')
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null)
   const [chatFilter, setChatFilter] = useState<'all' | 'unread' | 'groups'>('all')
   const [messageMenuId, setMessageMenuId] = useState<string | null>(null)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
@@ -130,10 +173,14 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
   const [messageNotice, setMessageNotice] = useState('')
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [groupManagementId, setGroupManagementId] = useState<string | null>(null)
   const [mobileThreadOpen, setMobileThreadOpen] = useState(Boolean(initialData.conversations[0]))
   const tailRef = useRef<HTMLDivElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const attachmentInputRef = useRef<HTMLInputElement>(null)
+  const lastTypingSentAt = useRef(0)
+  const typingStopTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const selectedConversation = initialData.conversations.find((chat) => chat.id === selectedId) ?? null
   const messageUrl = selectedId ? `/api/conversations/${encodeURIComponent(selectedId)}/messages` : null
@@ -142,20 +189,36 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
     revalidateOnFocus: true,
     keepPreviousData: false,
   })
+  const activityUrl = selectedId ? `/api/conversations/${encodeURIComponent(selectedId)}/activity` : null
+  const { data: activity } = useSWR<ChatActivity>(activityUrl, activityFetcher, { refreshInterval: 2500, revalidateOnFocus: true })
+  const { data: notificationsList = [], mutate: refreshNotifications } = useSWR<NotificationItem[]>('/api/notifications', notificationFetcher, { refreshInterval: 15000, revalidateOnFocus: true })
+  const { data: groupInvitations = [], mutate: refreshGroupInvitations } = useSWR<GroupInvitation[]>('/api/group-invitations', groupInvitationFetcher, { refreshInterval: 30000, revalidateOnFocus: true })
+  const searchQuery = filter.trim()
+  const peopleSearchUrl = searchMode === 'people' && searchQuery.length >= 2 ? `/api/search?type=people&q=${encodeURIComponent(searchQuery)}` : null
+  const messageSearchUrl = searchMode === 'messages' && searchQuery.length >= 2 ? `/api/search?type=messages&q=${encodeURIComponent(searchQuery)}` : null
+  const { data: peopleSearchResults = [], error: peopleSearchError } = useSWR<PeopleSearchResult[]>(peopleSearchUrl, peopleSearchFetcher, { keepPreviousData: false })
+  const { data: messageSearchResults = [], error: messageSearchError } = useSWR<MessageSearchResult[]>(messageSearchUrl, messageSearchFetcher, { keepPreviousData: false })
 
   const filteredConversations = useMemo(() => {
     const query = filter.trim().toLowerCase()
     return initialData.conversations.filter((chat) => {
-      const matchesQuery = !query || chat.name.toLowerCase().includes(query) || chat.lastMessage?.toLowerCase().includes(query)
+      const matchesQuery = searchMode !== 'chats' || !query || chat.name.toLowerCase().includes(query) || chat.lastMessage?.toLowerCase().includes(query)
       const matchesReadFilter = chatFilter !== 'unread' || chat.unreadCount > 0
       const matchesType = chatFilter !== 'groups' || chat.isGroup
       return matchesQuery && matchesReadFilter && matchesType
     })
-  }, [chatFilter, filter, initialData.conversations])
+  }, [chatFilter, filter, initialData.conversations, searchMode])
 
   useEffect(() => {
     tailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }, [messages.length, selectedId])
+
+  useEffect(() => {
+    if (!selectedMessageId || !messages.some((message) => message.id === selectedMessageId)) return
+    document.getElementById(`message-${selectedMessageId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const timer = window.setTimeout(() => setSelectedMessageId(null), 2400)
+    return () => window.clearTimeout(timer)
+  }, [messages, selectedMessageId])
 
   function openConversation(conversation: ConversationPreview) {
     setSelectedId(conversation.id)
@@ -274,6 +337,94 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
       setMessageNotice('Thanks. Your account report was sent to the moderation team.')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'This account could not be reported.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function blockUser(userId: string) {
+    if (pending) return
+    setPending(true)
+    setError('')
+    try {
+      await toggleBlockedUserAction(userId)
+      setMessageNotice('Your blocked contacts list was updated.')
+      setMessageMenuId(null)
+      router.refresh()
+    } catch {
+      setError('This account could not be blocked right now.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function reactToMessage(messageId: string, emoji: string) {
+    if (pending) return
+    setPending(true)
+    try {
+      await toggleMessageReactionAction(messageId, emoji)
+      await refreshMessages()
+    } catch {
+      setError('Your reaction could not be saved.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  function sendTypingState(typing: boolean) {
+    if (!selectedId) return
+    void fetch(`/api/conversations/${encodeURIComponent(selectedId)}/activity`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ typing }),
+    }).catch(() => undefined)
+    if (!typing && typingStopTimer.current) clearTimeout(typingStopTimer.current)
+  }
+
+  function handleDraftChange(value: string) {
+    setDraft(value)
+    const now = Date.now()
+    if (value.trim() && selectedId && now - lastTypingSentAt.current > 2500) {
+      sendTypingState(true)
+      lastTypingSentAt.current = now
+    }
+    if (typingStopTimer.current) clearTimeout(typingStopTimer.current)
+    if (value.trim()) typingStopTimer.current = setTimeout(() => sendTypingState(false), 3500)
+    else sendTypingState(false)
+  }
+
+  async function openNotification(notification: NotificationItem) {
+    await fetch('/api/notifications', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [notification.id] }) })
+    await refreshNotifications()
+    setNotificationsOpen(false)
+    const conversation = initialData.conversations.find((item) => item.id === notification.conversationId)
+    if (conversation) openConversation(conversation)
+  }
+
+  async function markAllNotificationsRead() {
+    const ids = notificationsList.filter((item) => !item.readAt).map((item) => item.id)
+    if (!ids.length) return
+    await fetch('/api/notifications', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) })
+    await refreshNotifications()
+  }
+
+  async function respondToInvitation(invitation: GroupInvitation, accept: boolean) {
+    if (pending) return
+    setPending(true)
+    setError('')
+    try {
+      await respondToGroupInvitationAction(invitation.id, accept)
+      await Promise.all([refreshGroupInvitations(), refreshNotifications()])
+      setNotificationsOpen(false)
+      if (accept) {
+        setSelectedId(invitation.conversationId)
+        setView('chats')
+        setMobileThreadOpen(true)
+        router.refresh()
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Your invitation response could not be saved.')
     } finally {
       setPending(false)
     }
@@ -433,31 +584,46 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
               <p className="inbox-kicker">YOUR SPACE</p>
               <h1>{view === 'chats' ? 'Messages' : 'Updates'}</h1>
             </div>
-            <button className="icon-button new-chat-button" type="button" aria-label="Start a new conversation" onClick={() => { setError(''); setDialog('new-chat') }}>
-              <Plus aria-hidden="true" />
-            </button>
+            <div className="inbox-title-actions">
+              <div className="notification-wrap">
+                <button className="icon-button notification-trigger" type="button" aria-label={`Notifications${notificationsList.some((item) => !item.readAt) || groupInvitations.length ? `, ${notificationsList.filter((item) => !item.readAt).length + groupInvitations.length} new` : ''}`} aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen((open) => !open)}>
+                  <Bell aria-hidden="true" />
+                  {notificationsList.some((item) => !item.readAt) || groupInvitations.length ? <span className="notification-badge">{notificationsList.filter((item) => !item.readAt).length + groupInvitations.length > 9 ? '9+' : notificationsList.filter((item) => !item.readAt).length + groupInvitations.length}</span> : null}
+                </button>
+                {notificationsOpen ? <div className="notification-popover" role="region" aria-label="Notifications">
+                  <div className="notification-popover-header"><strong>Notifications</strong><button type="button" onClick={() => void markAllNotificationsRead()} disabled={!notificationsList.some((item) => !item.readAt)}>Mark all read</button></div>
+                  {groupInvitations.map((invitation) => <div className="group-invitation-item" key={invitation.id}><span><strong>{invitation.groupName || 'Group invitation'}</strong><small>{invitation.inviterName} invited you to join</small></span><div><button type="button" onClick={() => void respondToInvitation(invitation, false)} disabled={pending}>Decline</button><button type="button" onClick={() => void respondToInvitation(invitation, true)} disabled={pending}>Accept</button></div></div>)}
+                  {notificationsList.map((notification) => <button className={`notification-item${notification.readAt ? '' : ' unread'}`} type="button" key={notification.id} onClick={() => void openNotification(notification)}><span><strong>{notification.title}</strong><small>{notification.body}</small></span><time>{timeLabel(notification.createdAt)}</time></button>)}
+                  {!groupInvitations.length && !notificationsList.length ? <p className="notification-empty">You&apos;re all caught up.</p> : null}
+                </div> : null}
+              </div>
+              <button className="icon-button new-chat-button" type="button" aria-label="Start a new conversation" onClick={() => { setError(''); setDialog('new-chat') }}><Plus aria-hidden="true" /></button>
+            </div>
           </div>
           <label className="search-box">
             <Search aria-hidden="true" />
             <span className="sr-only">Search {view === 'chats' ? 'chats' : 'updates'}</span>
-            <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder={view === 'chats' ? 'Search or start a new chat' : 'Find an update'} />
+            <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder={view === 'chats' ? searchMode === 'messages' ? 'Search message text' : searchMode === 'people' ? 'Search people you know' : 'Search conversations' : 'Find an update'} />
             {filter ? <button type="button" className="search-clear" aria-label="Clear search" onClick={() => setFilter('')}><X aria-hidden="true" /></button> : null}
           </label>
-          {view === 'chats' ? (
-            <div className="inbox-filters" aria-label="Conversation filter">
+          {view === 'chats' ? <>
+            <div className="search-mode-tabs" role="group" aria-label="Search in">
+              {(['chats', 'messages', 'people'] as SearchMode[]).map((mode) => <button className={searchMode === mode ? 'active' : ''} type="button" aria-pressed={searchMode === mode} key={mode} onClick={() => setSearchMode(mode)}>{mode[0].toUpperCase() + mode.slice(1)}</button>)}
+            </div>
+            {searchMode === 'chats' ? <div className="inbox-filters" aria-label="Conversation filter">
               <button className={`filter-pill${chatFilter === 'all' ? ' active' : ''}`} type="button" aria-pressed={chatFilter === 'all'} onClick={() => setChatFilter('all')}>All</button>
               <button className={`filter-pill${chatFilter === 'unread' ? ' active' : ''}`} type="button" aria-pressed={chatFilter === 'unread'} onClick={() => setChatFilter('unread')}>Unread</button>
               <button className={`filter-pill${chatFilter === 'groups' ? ' active' : ''}`} type="button" aria-pressed={chatFilter === 'groups'} onClick={() => setChatFilter('groups')}>Groups</button>
-            </div>
-          ) : null}
+            </div> : null}
+          </> : null}
         </header>
 
         {initialData.announcement ? <aside className="platform-announcement" aria-label="Platform announcement"><strong>{initialData.announcement.title}</strong><p>{initialData.announcement.body}</p></aside> : null}
         {messageNotice ? <p className="inline-notice" role="status">{messageNotice}</p> : null}
 
         {view === 'chats' ? (
-          <div className="inbox-list" role="list" aria-label="Conversation list">
-            {filteredConversations.length ? filteredConversations.map((conversation) => (
+          <div className="inbox-list" role="list" aria-label={searchMode === 'chats' ? 'Conversation list' : `${searchMode} search results`}>
+            {searchMode === 'chats' ? filteredConversations.length ? filteredConversations.map((conversation) => (
               <div role="listitem" key={conversation.id}>
                 <ChatRow conversation={conversation} active={selectedId === conversation.id} onSelect={() => openConversation(conversation)} />
               </div>
@@ -465,10 +631,16 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
               <div className="list-empty">
                 <span className="empty-icon"><MessageCircle aria-hidden="true" /></span>
                 <strong>{filter ? 'No matches found' : 'Your conversations start here'}</strong>
-                <p>{filter ? 'Try another name or message.' : 'Find someone you know and say hello.'}</p>
+                <p>{filter ? 'Try another conversation name.' : 'Find someone you know and say hello.'}</p>
                 {!filter ? <button className="text-action" type="button" onClick={() => setDialog('new-chat')}>Start a conversation <span aria-hidden="true">→</span></button> : null}
               </div>
-            )}
+            ) : searchQuery.length < 2 ? <p className="search-guidance">Type at least two characters to search {searchMode}.</p> : searchMode === 'people' ? peopleSearchError ? <p className="search-guidance" role="status">People search is unavailable right now.</p> : peopleSearchResults.length ? peopleSearchResults.map((person) => {
+              const conversation = initialData.conversations.find((item) => item.id === person.conversationId)
+              return <button className="search-result-row" type="button" key={person.id} onClick={() => { if (conversation) openConversation(conversation) }}><Avatar name={person.name} image={person.image} /><span><strong>{person.name}</strong><small>@{person.username} · existing contact</small></span></button>
+            }) : <p className="search-guidance">No people in your existing conversations match.</p> : messageSearchError ? <p className="search-guidance" role="status">Message search is unavailable right now.</p> : messageSearchResults.length ? messageSearchResults.map((result) => {
+              const conversation = initialData.conversations.find((item) => item.id === result.conversationId)
+              return <button className="search-result-row message-search-result" type="button" key={result.id} onClick={() => { if (conversation) { setSelectedMessageId(result.id); openConversation(conversation) } }}><span className="search-result-copy"><strong>{conversation?.name ?? 'Conversation'}</strong><small>{result.senderName} · {timeLabel(result.createdAt)}</small><span>{result.snippet}</span></span></button>
+            }) : <p className="search-guidance">No messages match your search.</p>}
           </div>
         ) : (
           <div className="inbox-list status-list" role="list" aria-label="Status updates">
@@ -491,7 +663,8 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
               <header className="conversation-header">
                 <button className="back-button" type="button" aria-label="Back to conversations" onClick={() => setMobileThreadOpen(false)}><ArrowLeft aria-hidden="true" /></button>
                 <Avatar name={selectedConversation.name} image={selectedConversation.image} group={selectedConversation.isGroup} />
-                <div className="conversation-heading"><h2>{selectedConversation.name}</h2><p>{selectedConversation.isGroup ? `Group · ${selectedConversation.participantCount} members` : 'Conversation'}</p></div>
+                <div className="conversation-heading"><h2>{selectedConversation.name}</h2><p>{activity?.typingNames.length ? `${activity.typingNames.join(', ')} typing…` : selectedConversation.isGroup ? `Group · ${selectedConversation.participantCount} members` : activity?.onlineUserIds.length ? 'online' : 'Conversation'}</p></div>
+                {selectedConversation.isGroup ? <button className="group-details-button" type="button" onClick={() => setGroupManagementId(selectedConversation.id)}><UsersRound aria-hidden="true" /><span>Details</span></button> : null}
               </header>
               <div className="message-history" role="log" aria-live="polite" aria-label={`Messages with ${selectedConversation.name}`}>
                 <div className="history-note"><span>Today</span></div>
@@ -500,7 +673,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                   const mine = message.senderId === initialData.user.id
                   const editing = editingMessageId === message.id
                   return (
-                    <article className={`message-line${mine ? ' message-mine' : ''}`} key={message.id}>
+                    <article id={`message-${message.id}`} className={`message-line${mine ? ' message-mine' : ''}${selectedMessageId === message.id ? ' message-search-highlight' : ''}`} key={message.id}>
                       {!mine ? <Avatar name={message.senderName} image={message.senderImage} size="regular" /> : null}
                       <div className={`message-content${mine ? ' message-content-mine' : ''}`}>
                         {!mine && selectedConversation.isGroup ? <span className="message-sender">{message.senderName}</span> : null}
@@ -514,7 +687,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                           <div className="message-bubble">
                             {message.body ? <p>{message.body}</p> : null}
                             {message.attachments.length ? <div className="message-attachments">{message.attachments.map((attachment) => <MessageAttachmentCard key={attachment.id} attachment={attachment} />)}</div> : null}
-                            <div className="message-meta"><time>{timeLabel(message.createdAt)}{message.editedAt ? <span className="edited-label"> · edited</span> : null}</time>{mine && (selectedConversation.isGroup || initialData.preferences.readReceipts) ? <CheckCheck className="message-check" aria-label="Sent" /> : null}</div>
+                            <div className="message-meta"><time>{timeLabel(message.createdAt)}{message.editedAt ? <span className="edited-label"> · edited</span> : null}</time>{mine && (selectedConversation.isGroup || initialData.preferences.readReceipts) ? <span className="message-receipt" title={`${message.readCount} read · ${message.deliveryCount} delivered`}><CheckCheck className="message-check" aria-label={`${message.readCount} read`} />{message.readCount ? <small>{message.readCount}</small> : null}</span> : null}</div>
                           </div>
                         )}
                         {!editing ? (
@@ -522,17 +695,22 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                             <button className="message-more-button" type="button" aria-label={`More options for ${mine ? 'your' : `${message.senderName}'s`} message`} aria-expanded={messageMenuId === message.id} onClick={() => setMessageMenuId((current) => current === message.id ? null : message.id)}><MoreHorizontal aria-hidden="true" /></button>
                             {messageMenuId === message.id ? (
                               <div className="message-menu" role="group" aria-label="Message actions">
+                                <div className="message-reaction-options" role="group" aria-label="React to message">
+                                  {['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => <button type="button" key={emoji} aria-label={`React with ${emoji}`} onClick={() => { setMessageMenuId(null); void reactToMessage(message.id, emoji) }}>{emoji}</button>)}
+                                </div>
                                 {mine ? <>
                                   <button type="button" onClick={() => { setEditingMessageId(message.id); setEditDraft(message.body); setMessageMenuId(null) }}><Pencil aria-hidden="true" /> Edit</button>
                                   <button type="button" onClick={() => void removeMessage(message.id)}><Trash2 aria-hidden="true" /> Delete for everyone</button>
                                 </> : <>
                                   <button type="button" onClick={() => void reportMessage(message.id)} disabled={pending}><Flag aria-hidden="true" /> Report message</button>
                                   <button type="button" onClick={() => void reportUser(message.senderId)} disabled={pending}><Flag aria-hidden="true" /> Report account</button>
+                                  <button type="button" onClick={() => void blockUser(message.senderId)} disabled={pending}><X aria-hidden="true" /> Block account</button>
                                 </>}
                               </div>
                             ) : null}
                           </div>
                         ) : null}
+                        {message.reactions.length ? <div className="message-reactions" aria-label="Message reactions">{message.reactions.map((reaction) => <button type="button" key={reaction.emoji} aria-pressed={reaction.reacted} onClick={() => void reactToMessage(message.id, reaction.emoji)}>{reaction.emoji}<span>{reaction.count}</span></button>)}</div> : null}
                       </div>
                     </article>
                   )
@@ -584,7 +762,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                   </div>
                   <label className="composer-field" htmlFor="message-composer">
                     <span className="sr-only">Write a message</span>
-                    <textarea id="message-composer" ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} placeholder="Write a message" rows={1} maxLength={4000} />
+                    <textarea id="message-composer" ref={composerRef} value={draft} onChange={(event) => handleDraftChange(event.target.value)} onBlur={() => sendTypingState(false)} onKeyDown={onComposerKeyDown} placeholder="Write a message" rows={1} maxLength={4000} />
                   </label>
                   <button className="send-button" type="submit" aria-label="Send message" disabled={(!draft.trim() && !selectedFiles.length) || pending}>
                     <Send aria-hidden="true" />
@@ -708,6 +886,10 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
           </section>
         </div>
       ) : null}
+      {groupManagementId ? (() => {
+        const group = initialData.conversations.find((conversation) => conversation.id === groupManagementId && conversation.isGroup)
+        return group ? <GroupManagementDialog conversationId={group.id} groupName={group.name} description={group.description} viewerId={initialData.user.id} viewerRole={group.role} onClose={() => setGroupManagementId(null)} onLeft={() => { setGroupManagementId(null); setSelectedId(null); setMobileThreadOpen(false) }} /> : null
+      })() : null}
     </main>
   )
 }

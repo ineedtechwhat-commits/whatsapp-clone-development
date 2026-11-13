@@ -11,6 +11,13 @@ export type ChatPreferences = {
   groupInvitePolicy: Visibility
   callsPrivacy: Visibility
   securityNotifications: boolean
+  notifyMessages: boolean
+  notifyGroupMessages: boolean
+  notifyMentions: boolean
+  notifyReactions: boolean
+  notifyInvitations: boolean
+  notifyAnnouncements: boolean
+  notificationSound: boolean
 }
 
 export type ChatUser = {
@@ -20,6 +27,8 @@ export type ChatUser = {
   emailVerified: boolean
   image: string | null
   about: string
+  username: string
+  createdAt: string
   isAdmin: boolean
 }
 
@@ -36,6 +45,9 @@ export type Contact = {
   email: string
   image: string | null
   about: string
+  username: string
+  isOnline: boolean
+  lastActiveAt: string | null
 }
 
 export type ConversationPreview = {
@@ -47,6 +59,9 @@ export type ConversationPreview = {
   lastMessageAt: string
   unreadCount: number
   participantCount: number
+  description: string | null
+  role: 'admin' | 'member'
+  typingNames: string[]
 }
 
 export type StatusItem = {
@@ -86,6 +101,11 @@ export type ChatMessage = {
   createdAt: string
   editedAt: string | null
   attachments: MessageAttachment[]
+  reactions: Array<{ emoji: string; count: number; reacted: boolean }>
+  deliveryCount: number
+  readCount: number
+  pinnedAt: string | null
+  replyToMessageId: string | null
 }
 
 export type WorkspaceData = {
@@ -95,4 +115,5 @@ export type WorkspaceData = {
   contacts: Contact[]
   statuses: StatusGroup[]
   announcement: PlatformAnnouncement | null
+  unreadNotifications: number
 }

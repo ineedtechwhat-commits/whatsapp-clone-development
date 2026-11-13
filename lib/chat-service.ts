@@ -7,6 +7,9 @@ import {
   statuses,
   userProfiles,
   users,
+  userPresence,
+  conversationTyping,
+  notifications,
   adminControlRecords,
 } from '@/lib/db/schema'
 import { getSessionUser } from '@/lib/auth-session'
@@ -22,6 +25,11 @@ function messageTimerPreference(value: string | undefined): MessageTimer {
   return value === '24h' || value === '7d' || value === '90d' || value === 'off' ? value : 'off'
 }
 
+function defaultUsername(email: string, userId: string) {
+  const base = email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 18) || 'friend'
+  return `${base}_${userId.slice(-6).toLowerCase()}`
+}
+
 export async function getWorkspaceData() {
   const sessionUser = await getSessionUser()
   if (!sessionUser) throw new Error('Unauthorized')
@@ -30,12 +38,20 @@ export async function getWorkspaceData() {
   const defaultAbout = access.isAdmin ? 'F.R.I.E.N.D.S creator' : 'Available'
   await db
     .insert(userProfiles)
-    .values({ userId: sessionUser.id, about: defaultAbout })
+    .values({ userId: sessionUser.id, username: defaultUsername(sessionUser.email, sessionUser.id), about: defaultAbout })
     .onConflictDoNothing({ target: userProfiles.userId })
 
   const [profile] = await db
     .select({
       about: userProfiles.about,
+      username: userProfiles.username,
+      notifyMessages: userProfiles.notifyMessages,
+      notifyGroupMessages: userProfiles.notifyGroupMessages,
+      notifyMentions: userProfiles.notifyMentions,
+      notifyReactions: userProfiles.notifyReactions,
+      notifyInvitations: userProfiles.notifyInvitations,
+      notifyAnnouncements: userProfiles.notifyAnnouncements,
+      notificationSound: userProfiles.notificationSound,
       lastSeenVisibility: userProfiles.lastSeenVisibility,
       profilePhotoVisibility: userProfiles.profilePhotoVisibility,
       aboutVisibility: userProfiles.aboutVisibility,
@@ -50,6 +66,7 @@ export async function getWorkspaceData() {
     .where(eq(userProfiles.userId, sessionUser.id))
     .limit(1)
 
+  const [account] = await db.select({ createdAt: users.createdAt }).from(users).where(eq(users.id, sessionUser.id)).limit(1)
   const user: ChatUser = {
     id: sessionUser.id,
     name: sessionUser.name,
@@ -57,6 +74,8 @@ export async function getWorkspaceData() {
     emailVerified: Boolean(sessionUser.emailVerified),
     image: profileImageUrl(sessionUser.image ?? null, sessionUser.id),
     about: profile?.about ?? defaultAbout,
+    username: profile?.username ?? 'friend',
+    createdAt: (account?.createdAt ?? new Date()).toISOString(),
     isAdmin: access.isAdmin,
   }
 
@@ -70,6 +89,13 @@ export async function getWorkspaceData() {
     groupInvitePolicy: visibilityPreference(profile?.groupInvitePolicy, 'everyone'),
     callsPrivacy: visibilityPreference(profile?.callsPrivacy, 'everyone'),
     securityNotifications: profile?.securityNotifications ?? true,
+    notifyMessages: profile?.notifyMessages ?? true,
+    notifyGroupMessages: profile?.notifyGroupMessages ?? true,
+    notifyMentions: profile?.notifyMentions ?? true,
+    notifyReactions: profile?.notifyReactions ?? true,
+    notifyInvitations: profile?.notifyInvitations ?? true,
+    notifyAnnouncements: profile?.notifyAnnouncements ?? true,
+    notificationSound: profile?.notificationSound ?? false,
   }
 
   const memberships = await db
@@ -77,7 +103,9 @@ export async function getWorkspaceData() {
       conversationId: conversationMembers.conversationId,
       lastReadAt: conversationMembers.lastReadAt,
       title: conversations.title,
+      description: conversations.description,
       isGroup: conversations.isGroup,
+      role: conversationMembers.role,
       updatedAt: conversations.updatedAt,
     })
     .from(conversationMembers)
@@ -90,6 +118,7 @@ export async function getWorkspaceData() {
   const contactsById = new Map<string, Contact>()
   const conversationsList: ConversationPreview[] = []
   const peopleByConversation = new Map<string, Array<{ id: string; name: string; email: string; image: string | null; about: string | null }>>()
+  const typingNamesByConversation = new Map<string, string[]>()
 
   if (conversationIds.length) {
     const participantRows = await db
@@ -100,13 +129,27 @@ export async function getWorkspaceData() {
         email: users.email,
         image: users.image,
         about: userProfiles.about,
+        username: userProfiles.username,
         profilePhotoVisibility: userProfiles.profilePhotoVisibility,
         aboutVisibility: userProfiles.aboutVisibility,
+        lastSeenVisibility: userProfiles.lastSeenVisibility,
       })
       .from(conversationMembers)
       .innerJoin(users, eq(users.id, conversationMembers.userId))
       .leftJoin(userProfiles, eq(userProfiles.userId, users.id))
       .where(inArray(conversationMembers.conversationId, conversationIds))
+    const presenceRows = participantRows.length
+      ? await db.select({ userId: userPresence.userId, lastActiveAt: userPresence.lastActiveAt }).from(userPresence)
+        .where(inArray(userPresence.userId, Array.from(new Set(participantRows.map((person) => person.id)))))
+      : []
+    const presenceByUser = new Map(presenceRows.map((row) => [row.userId, row.lastActiveAt]))
+    const typingRows = await db.select({ conversationId: conversationTyping.conversationId, userId: conversationTyping.userId, name: users.name })
+      .from(conversationTyping)
+      .innerJoin(users, eq(users.id, conversationTyping.userId))
+      .where(and(inArray(conversationTyping.conversationId, conversationIds), gt(conversationTyping.expiresAt, new Date()), ne(conversationTyping.userId, sessionUser.id)))
+    for (const row of typingRows) {
+      typingNamesByConversation.set(row.conversationId, [...(typingNamesByConversation.get(row.conversationId) ?? []), row.name])
+    }
 
     for (const person of participantRows) {
       const people = peopleByConversation.get(person.conversationId) ?? []
@@ -119,6 +162,9 @@ export async function getWorkspaceData() {
           email: person.email,
           image: person.profilePhotoVisibility === 'nobody' ? null : profileImageUrl(person.image, person.id),
           about: person.aboutVisibility === 'nobody' ? '' : person.about ?? 'Available',
+          username: person.username ?? 'friend',
+          isOnline: person.lastSeenVisibility !== 'nobody' && Boolean(presenceByUser.get(person.id) && Date.now() - presenceByUser.get(person.id)!.getTime() < 60_000),
+          lastActiveAt: person.lastSeenVisibility === 'nobody' ? null : presenceByUser.get(person.id)?.toISOString() ?? null,
         })
       }
     }
@@ -176,6 +222,9 @@ export async function getWorkspaceData() {
       lastMessageAt: (lastMessage?.createdAt ?? membership.updatedAt).toISOString(),
       unreadCount: unreadByConversation.get(membership.conversationId) ?? 0,
       participantCount: (peopleByConversation.get(membership.conversationId) ?? []).length,
+      description: membership.description,
+      role: membership.role === 'admin' ? 'admin' : 'member',
+      typingNames: typingNamesByConversation.get(membership.conversationId) ?? [],
     })
   }
 
@@ -242,6 +291,8 @@ export async function getWorkspaceData() {
   const announcement = announcementRecord && typeof announcementTitle === 'string' && typeof announcementBody === 'string'
     ? { id: announcementRecord.id, title: announcementTitle, body: announcementBody, createdAt: announcementRecord.createdAt.toISOString() }
     : null
+  const [notificationCount] = await db.select({ value: count(notifications.id) }).from(notifications)
+    .where(and(eq(notifications.userId, sessionUser.id), isNull(notifications.readAt)))
 
   return {
     user,
@@ -250,5 +301,6 @@ export async function getWorkspaceData() {
     contacts: Array.from(contactsById.values()).sort((a, b) => a.name.localeCompare(b.name)),
     statuses: statusesList,
     announcement,
+    unreadNotifications: notificationCount?.value ?? 0,
   }
 }

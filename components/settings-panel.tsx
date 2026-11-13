@@ -118,6 +118,7 @@ export function SettingsPanel({
   const router = useRouter()
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab)
   const [name, setName] = useState(user.name)
+  const [username, setUsername] = useState(user.username)
   const [about, setAbout] = useState(user.about)
   const [profileImage, setProfileImage] = useState(user.image)
   const [preferences, setPreferences] = useState<ChatPreferences>(initialPreferences)
@@ -139,7 +140,7 @@ export function SettingsPanel({
     setNotice('')
     setError('')
     try {
-      await updateProfileAction(name, about)
+      await updateProfileAction(name, about, username)
       setNotice('Your profile is up to date.')
       router.refresh()
     } catch {
@@ -266,6 +267,7 @@ export function SettingsPanel({
                 </div>
                 <p className="settings-photo-help" id="settings-profile-photo-help">JPG, PNG, WebP, or GIF. Maximum file size: 5 MB.</p>
                 <label className="settings-input" htmlFor="settings-name"><span>Name</span><input id="settings-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={100} required /></label>
+                <label className="settings-input" htmlFor="settings-username"><span>Username</span><input id="settings-username" value={username} onChange={(event) => setUsername(event.target.value.replace(/^@/, ''))} maxLength={24} autoComplete="username" required /><small>People can find you by @{username || 'username'}.</small></label>
                 <label className="settings-input" htmlFor="settings-about"><span>About</span>{user.isAdmin ? <textarea id="settings-about" value={about} onChange={(event) => setAbout(event.target.value)} rows={4} required /> : <input id="settings-about" value={about} onChange={(event) => setAbout(event.target.value)} maxLength={120} required />}</label>
                 {user.isAdmin ? <small className="settings-admin-note">Creator accounts are not subject to the standard bio character limit.</small> : null}
                 <div className="settings-readonly"><span>Email</span><strong>{user.email}</strong><small>{user.emailVerified ? 'Verified email' : 'Email verification required'}</small></div>
@@ -279,8 +281,16 @@ export function SettingsPanel({
               <div className="settings-form">
                 <div className="settings-section-heading"><p className="inbox-kicker">ACCOUNT</p><h3>Account</h3><p>Keep your account protected and take a copy of your information.</p></div>
                 <div className="settings-readonly"><span>Email address</span><strong>{user.email}</strong><small>{user.emailVerified ? 'Verified' : 'Not verified'}</small></div>
+                <div className="settings-readonly"><span>Member since</span><strong>{new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).format(new Date(user.createdAt))}</strong></div>
                 <form onSubmit={savePreferences}>
                   <SettingsToggle id="security-notifications" label="Security notifications" description="Keep email alerts enabled for important account changes." checked={preferences.securityNotifications} onChange={(value) => updatePreference('securityNotifications', value)} />
+                  <SettingsToggle id="notify-messages" label="Direct messages" description="Notify me when someone sends a direct message." checked={preferences.notifyMessages} onChange={(value) => updatePreference('notifyMessages', value)} />
+                  <SettingsToggle id="notify-groups" label="Group messages" description="Notify me about new messages in groups." checked={preferences.notifyGroupMessages} onChange={(value) => updatePreference('notifyGroupMessages', value)} />
+                  <SettingsToggle id="notify-reactions" label="Message reactions" description="Notify me when someone reacts to my message." checked={preferences.notifyReactions} onChange={(value) => updatePreference('notifyReactions', value)} />
+                  <SettingsToggle id="notify-mentions" label="Mentions" description="Notify me when a group message mentions me." checked={preferences.notifyMentions} onChange={(value) => updatePreference('notifyMentions', value)} />
+                  <SettingsToggle id="notify-announcements" label="Announcements" description="Show important platform announcements in your inbox." checked={preferences.notifyAnnouncements} onChange={(value) => updatePreference('notifyAnnouncements', value)} />
+                  <SettingsToggle id="notify-invitations" label="Group invitations" description="Notify me about group invitations and responses." checked={preferences.notifyInvitations} onChange={(value) => updatePreference('notifyInvitations', value)} />
+                  <SettingsToggle id="notification-sound" label="Notification sounds" description="Play a sound for new in-app notifications." checked={preferences.notificationSound} onChange={(value) => updatePreference('notificationSound', value)} />
                   <button className="solid-button settings-submit" type="submit" disabled={pending}>{pending ? 'Saving…' : 'Save account settings'}</button>
                 </form>
                 <a className="settings-action-row" href="/api/account/export"><span className="settings-action-icon"><ArrowDownToLine aria-hidden="true" /></span><span><strong>Request account info</strong><small>Download a copy of your profile, chats, and statuses.</small></span><span className="settings-chevron" aria-hidden="true">›</span></a>
