@@ -1466,3 +1466,26 @@
 :is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .composer-reply-preview small,
 :is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .composer-reply-preview button { color: #aebac1; }
 :is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .composer-reply-preview button:hover { background: #34434a; }
+.pinned-message-strip { display: flex; min-width: 0; align-items: center; gap: 12px; padding: 9px 22px; border-bottom: 1px solid #dfeae2; background: #f3f9f5; }
+.pinned-message-label { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; color: #087b64; font-size: 10px; }
+.pinned-message-label svg { width: 14px; height: 14px; }
+.pinned-message-label small { color: #718078; font-size: 9px; }
+.pinned-message-list { display: flex; min-width: 0; gap: 7px; overflow-x: auto; }
+.pinned-message-list button { display: flex; min-width: 110px; max-width: 240px; flex-direction: column; gap: 2px; padding: 5px 8px; border: 1px solid #dce8df; border-radius: 8px; background: #fff; color: #31453b; text-align: left; cursor: pointer; }
+.pinned-message-list button:hover { border-color: #9acdb0; background: #fafffb; }
+.pinned-message-list button span { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.pinned-message-list button small { color: #748178; font-size: 8px; }
+.message-pinned-indicator { display: inline-flex; color: #008069; }
+.message-pinned-indicator svg { width: 11px; height: 11px; }
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .pinned-message-strip { border-color: #34434a; background: #17232a; }
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .pinned-message-label { color: #79d7b6; }
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .pinned-message-label small,
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .pinned-message-list button small { color: #aebac1; }
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .pinned-message-list button { border-color: #34434a; background: #202c33; color: #e9edef; }
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .pinned-message-list button:hover { border-color: #336653; background: #263b33; }
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .message-pinned-indicator { color: #79d7b6; }
+@media (max-width: 760px) {
+  .pinned-message-strip { align-items: flex-start; flex-direction: column; gap: 6px; padding: 8px 14px; }
+  .pinned-message-list { width: 100%; }
+  .pinned-message-list button { max-width: min(75vw, 240px); }
+}

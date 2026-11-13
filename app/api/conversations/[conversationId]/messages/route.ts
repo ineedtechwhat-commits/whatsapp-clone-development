@@ -32,28 +32,31 @@ export async function GET(
     lte(messages.expiresAt, now),
   ))
 
-  const rows = await db
-    .select({
-      id: messages.id,
-      conversationId: messages.conversationId,
-      senderId: messages.senderId,
-      senderName: users.name,
-      senderImage: users.image,
-      body: messages.body,
-      createdAt: messages.createdAt,
-      editedAt: messages.editedAt,
-      pinnedAt: messages.pinnedAt,
-      replyToMessageId: messages.replyToMessageId,
-    })
-    .from(messages)
-    .innerJoin(users, eq(users.id, messages.senderId))
-    .where(and(
-      eq(messages.conversationId, conversationId),
-      isNull(messages.deletedAt),
-      or(isNull(messages.expiresAt), gt(messages.expiresAt, now)),
-    ))
-    .orderBy(desc(messages.createdAt))
-    .limit(120)
+  const messageFields = {
+    id: messages.id,
+    conversationId: messages.conversationId,
+    senderId: messages.senderId,
+    senderName: users.name,
+    senderImage: users.image,
+    body: messages.body,
+    createdAt: messages.createdAt,
+    editedAt: messages.editedAt,
+    pinnedAt: messages.pinnedAt,
+    replyToMessageId: messages.replyToMessageId,
+  }
+  const visibleMessageFilter = and(
+    eq(messages.conversationId, conversationId),
+    isNull(messages.deletedAt),
+    or(isNull(messages.expiresAt), gt(messages.expiresAt, now)),
+  )
+  const [recentRows, pinnedRows] = await Promise.all([
+    db.select(messageFields).from(messages).innerJoin(users, eq(users.id, messages.senderId))
+      .where(visibleMessageFilter).orderBy(desc(messages.createdAt)).limit(120),
+    db.select(messageFields).from(messages).innerJoin(users, eq(users.id, messages.senderId))
+      .where(and(visibleMessageFilter, isNotNull(messages.pinnedAt))).orderBy(desc(messages.pinnedAt)).limit(3),
+  ])
+  const rows = Array.from(new Map([...recentRows, ...pinnedRows].map((row) => [row.id, row])).values())
+    .sort((first, second) => second.createdAt.getTime() - first.createdAt.getTime())
 
   const replyIds = Array.from(new Set(rows.flatMap((row) => row.replyToMessageId ? [row.replyToMessageId] : [])))
   const replyRows = replyIds.length

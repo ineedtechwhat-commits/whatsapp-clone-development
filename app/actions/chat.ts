@@ -2,7 +2,7 @@
 
 import { del, head } from '@vercel/blob'
 import { randomUUID } from 'node:crypto'
-import { and, asc, eq, gt, inArray, isNull, ne, or } from 'drizzle-orm'
+import { and, asc, eq, gt, inArray, isNotNull, isNull, ne, or } from 'drizzle-orm'
 import { db } from '@/lib/db'
 import {
   accounts,
@@ -401,6 +401,62 @@ export async function deleteMessageAction(messageIdInput: string) {
     await tx.delete(messageAttachments).where(eq(messageAttachments.messageId, messageId))
   })
   if (attachmentRows.length) await del(attachmentRows.map((attachment) => attachment.pathname)).catch(() => undefined)
+}
+
+export async function toggleMessagePinAction(messageIdInput: string) {
+  const userId = await requireUserId()
+  const messageId = typeof messageIdInput === 'string' ? messageIdInput.trim() : ''
+  if (!messageId || messageId.length > 80) throw new Error('Message not found.')
+
+  return db.transaction(async (tx) => {
+    const [candidate] = await tx.select({ conversationId: messages.conversationId })
+      .from(messages)
+      .where(eq(messages.id, messageId))
+      .limit(1)
+    if (!candidate) throw new Error('Message not found.')
+
+    const [conversation] = await tx.select({ id: conversations.id })
+      .from(conversations)
+      .where(eq(conversations.id, candidate.conversationId))
+      .for('update')
+      .limit(1)
+    if (!conversation) throw new Error('Message not found.')
+
+    const [membership] = await tx.select({ id: conversationMembers.id })
+      .from(conversationMembers)
+      .where(and(eq(conversationMembers.conversationId, candidate.conversationId), eq(conversationMembers.userId, userId)))
+      .limit(1)
+    if (!membership) throw new Error('Message not found.')
+
+    const [message] = await tx.select({ id: messages.id, conversationId: messages.conversationId, pinnedAt: messages.pinnedAt })
+      .from(messages)
+      .where(and(
+        eq(messages.id, messageId),
+        eq(messages.conversationId, candidate.conversationId),
+        isNull(messages.deletedAt),
+        or(isNull(messages.expiresAt), gt(messages.expiresAt, new Date())),
+      ))
+      .limit(1)
+    if (!message) throw new Error('Message is no longer available.')
+
+    if (message.pinnedAt) {
+      await tx.update(messages).set({ pinnedAt: null }).where(eq(messages.id, message.id))
+      return false
+    }
+
+    const pinnedMessages = await tx.select({ id: messages.id })
+      .from(messages)
+      .where(and(
+        eq(messages.conversationId, message.conversationId),
+        isNotNull(messages.pinnedAt),
+        isNull(messages.deletedAt),
+        or(isNull(messages.expiresAt), gt(messages.expiresAt, new Date())),
+      ))
+    if (pinnedMessages.length >= 3) throw new Error('You can pin up to 3 messages in a conversation.')
+
+    await tx.update(messages).set({ pinnedAt: new Date() }).where(eq(messages.id, message.id))
+    return true
+  })
 }
 
 export async function createStatusAction(captionInput: string) {
