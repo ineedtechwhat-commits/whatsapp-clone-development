@@ -117,6 +117,7 @@ export type ChatMessage = {
   readCount: number
   pinnedAt: string | null
   replyToMessageId: string | null
+  replyTo: { id: string; senderName: string; body: string } | null
 }
 
 export type WorkspaceData = {

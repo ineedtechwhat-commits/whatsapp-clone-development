@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { upload } from '@vercel/blob/client'
 import useSWR from 'swr'
 import {
@@ -46,6 +46,7 @@ import {
 import { submitMessageReportAction, submitUserReportAction } from '@/app/actions/admin'
 import { SettingsPanel } from '@/components/settings-panel'
 import { GroupManagementDialog } from '@/components/group-management-dialog'
+import { ConversationMembersPanel } from '@/components/conversation-members-panel'
 import { ProfileCardDialog } from '@/components/profile-card-dialog'
 import { formatFileSize, MessageAttachmentCard, StatusMediaPreview } from '@/components/chat-media'
 import type { AppTheme, AvatarDecoration, ChatMessage, Contact, ConversationPreview, StatusGroup, WorkspaceData } from '@/lib/chat-types'
@@ -122,6 +123,21 @@ function timeLabel(value: string) {
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date)
 }
 
+function messageDateLabel(value: string) {
+  const date = new Date(value)
+  const today = new Date()
+  const yesterday = new Date(today)
+  yesterday.setDate(today.getDate() - 1)
+  if (date.toDateString() === today.toDateString()) return 'Today'
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday'
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    ...(date.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' as const }),
+  }).format(date)
+}
+
 function ChatRow({ conversation, active, onSelect, onProfileClick }: { conversation: ConversationPreview; active: boolean; onSelect: () => void; onProfileClick?: () => void }) {
   return (
     <div className={`chat-row${active ? ' is-active' : ''}`}>
@@ -169,6 +185,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null)
   const [chatFilter, setChatFilter] = useState<'all' | 'unread' | 'groups'>('all')
   const [messageMenuId, setMessageMenuId] = useState<string | null>(null)
+  const [replyingToMessage, setReplyingToMessage] = useState<ChatMessage | null>(null)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [editDraft, setEditDraft] = useState('')
   const [draft, setDraft] = useState('')
@@ -180,6 +197,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
   const [messageNotice, setMessageNotice] = useState('')
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [groupManagementId, setGroupManagementId] = useState<string | null>(null)
+  const [membersPanelOpen, setMembersPanelOpen] = useState(Boolean(initialData.conversations[0]?.isGroup))
   const [mobileThreadOpen, setMobileThreadOpen] = useState(Boolean(initialData.conversations[0]))
   const tailRef = useRef<HTMLDivElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
@@ -230,11 +248,13 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
 
   function openConversation(conversation: ConversationPreview) {
     setSelectedId(conversation.id)
+    setMembersPanelOpen(conversation.isGroup)
     setMobileThreadOpen(true)
     setView('chats')
     setEditingMessageId(null)
     setEditDraft('')
     setMessageMenuId(null)
+    setReplyingToMessage(null)
     setSelectedFiles([])
     setEmojiPickerOpen(false)
     setError('')
@@ -261,11 +281,12 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
           )
           uploadedFiles.push({ pathname: blob.pathname, filename: file.name })
         }
-        await sendMessageWithAttachmentsAction(selectedId, draft, uploadedFiles)
+        await sendMessageWithAttachmentsAction(selectedId, draft, uploadedFiles, replyingToMessage?.conversationId === selectedId ? replyingToMessage.id : null)
       } else {
-        await sendMessageAction(selectedId, draft)
+        await sendMessageAction(selectedId, draft, replyingToMessage?.conversationId === selectedId ? replyingToMessage.id : null)
       }
       setDraft('')
+      setReplyingToMessage(null)
       setSelectedFiles([])
       setEmojiPickerOpen(false)
       await refreshMessages()
@@ -427,6 +448,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
       setNotificationsOpen(false)
       if (accept) {
         setSelectedId(invitation.conversationId)
+        setMembersPanelOpen(true)
         setView('chats')
         setMobileThreadOpen(true)
         router.refresh()
@@ -471,6 +493,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
         String(form.get('members') ?? ''),
       )
       setSelectedId(conversationId)
+      setMembersPanelOpen(true)
       setMobileThreadOpen(true)
       setView('chats')
       setDialog(null)
@@ -569,7 +592,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
   const activeStatus = initialData.statuses.find((group) => group.userId === selectedStatusId) ?? null
 
   return (
-    <main className={`messenger-shell${mobileThreadOpen ? ' thread-open' : ''}`} data-theme={theme}>
+    <main className={`messenger-shell${mobileThreadOpen ? ' thread-open' : ''}${view === 'chats' && selectedConversation?.isGroup && membersPanelOpen ? ' has-members-panel' : ''}`} data-theme={theme}>
       <nav className="app-rail" aria-label="Main navigation">
         <a className="rail-brand" href="/" aria-label="F.R.I.E.N.D.S home"><BrandMark className="brand-mark" /></a>
         <div className="rail-nav">
@@ -685,20 +708,29 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                 <button className="back-button" type="button" aria-label="Back to conversations" onClick={() => setMobileThreadOpen(false)}><ArrowLeft aria-hidden="true" /></button>
                 <Avatar name={selectedConversation.name} image={selectedConversation.image} group={selectedConversation.isGroup} decoration={selectedConversationContact?.avatarDecoration ?? selectedConversation.avatarDecoration} onClick={selectedConversationContact ? () => setProfileCardPerson(selectedConversationContact) : undefined} />
                 <div className="conversation-heading"><h2>{selectedConversation.name}</h2><p>{activity?.typingNames.length ? `${activity.typingNames.join(', ')} typing…` : selectedConversation.isGroup ? `Group · ${selectedConversation.participantCount} members` : activity?.onlineUserIds.length ? 'online' : 'Conversation'}</p></div>
-                {selectedConversation.isGroup ? <button className="group-details-button" type="button" onClick={() => setGroupManagementId(selectedConversation.id)}><UsersRound aria-hidden="true" /><span>Details</span></button> : null}
+                {selectedConversation.isGroup ? <>
+                  <button className={`group-details-button member-panel-toggle${membersPanelOpen ? ' is-active' : ''}`} type="button" aria-label={membersPanelOpen ? 'Hide group members' : 'Show group members'} aria-expanded={membersPanelOpen} aria-controls={membersPanelOpen ? 'conversation-member-panel' : undefined} onClick={() => setMembersPanelOpen((open) => !open)}><UsersRound aria-hidden="true" /><span>Members</span></button>
+                  <button className="group-details-button" type="button" onClick={() => setGroupManagementId(selectedConversation.id)}><Settings2 aria-hidden="true" /><span>Manage</span></button>
+                </> : null}
               </header>
               <div className="message-history" role="log" aria-live="polite" aria-label={`Messages with ${selectedConversation.name}`}>
-                <div className="history-note"><span>Today</span></div>
                 {messagesError ? <div className="message-load-error">Messages could not be refreshed. Your conversation is still available.</div> : null}
-                {messages.map((message) => {
+                {messages.map((message, index) => {
+              const previousMessage = messages[index - 1]
+              const isDateBoundary = !previousMessage || new Date(previousMessage.createdAt).toDateString() !== new Date(message.createdAt).toDateString()
+              const currentMessageTime = new Date(message.createdAt).getTime()
+              const previousMessageTime = previousMessage ? new Date(previousMessage.createdAt).getTime() : 0
+              const isGroupedWithPrevious = Boolean(previousMessage && !isDateBoundary && previousMessage.senderId === message.senderId && currentMessageTime >= previousMessageTime && currentMessageTime - previousMessageTime < 5 * 60 * 1000)
               const mine = message.senderId === initialData.user.id
               const messageContact = initialData.contacts.find((contact) => contact.id === message.senderId)
               const editing = editingMessageId === message.id
               return (
-                    <article id={`message-${message.id}`} className={`message-line${mine ? ' message-mine' : ''}${selectedMessageId === message.id ? ' message-search-highlight' : ''}`} key={message.id}>
-                      {!mine ? <Avatar name={message.senderName} image={message.senderImage} size="regular" decoration={messageContact?.avatarDecoration} onClick={messageContact ? () => setProfileCardPerson(messageContact) : undefined} /> : null}
+                    <Fragment key={message.id}>
+                      {isDateBoundary ? <div className="history-note"><span>{messageDateLabel(message.createdAt)}</span></div> : null}
+                    <article id={`message-${message.id}`} className={`message-line${mine ? ' message-mine' : ''}${isGroupedWithPrevious ? ' message-grouped' : ''}${selectedMessageId === message.id ? ' message-search-highlight' : ''}`}>
+                      {!mine && !isGroupedWithPrevious ? <Avatar name={message.senderName} image={message.senderImage} size="regular" decoration={messageContact?.avatarDecoration} onClick={messageContact ? () => setProfileCardPerson(messageContact) : undefined} /> : null}
                       <div className={`message-content${mine ? ' message-content-mine' : ''}`}>
-                        {!mine && selectedConversation.isGroup ? <span className="message-sender">{message.senderName}</span> : null}
+                        {!mine && !isGroupedWithPrevious && selectedConversation.isGroup ? <span className="message-sender">{message.senderName}</span> : null}
                         {editing ? (
                           <form className="message-edit-form" onSubmit={(event) => { event.preventDefault(); void saveMessageEdit(message.id) }}>
                             <label className="sr-only" htmlFor={`edit-${message.id}`}>Edit message</label>
@@ -707,6 +739,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                           </form>
                         ) : (
                           <div className="message-bubble">
+                            {message.replyToMessageId ? <div className="message-reply-quote"><strong>{message.replyTo?.senderName ?? 'Original message'}</strong><span>{message.replyTo ? message.replyTo.body || 'Attachment' : 'This message is no longer available.'}</span></div> : null}
                             {message.body ? <p>{message.body}</p> : null}
                             {message.attachments.length ? <div className="message-attachments">{message.attachments.map((attachment) => <MessageAttachmentCard key={attachment.id} attachment={attachment} />)}</div> : null}
                             <div className="message-meta"><time>{timeLabel(message.createdAt)}{message.editedAt ? <span className="edited-label"> · edited</span> : null}</time>{mine && (selectedConversation.isGroup || initialData.preferences.readReceipts) ? <span className="message-receipt" title={`${message.readCount} read · ${message.deliveryCount} delivered`}><CheckCheck className="message-check" aria-label={`${message.readCount} read`} />{message.readCount ? <small>{message.readCount}</small> : null}</span> : null}</div>
@@ -720,6 +753,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                                 <div className="message-reaction-options" role="group" aria-label="React to message">
                                   {['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => <button type="button" key={emoji} aria-label={`React with ${emoji}`} onClick={() => { setMessageMenuId(null); void reactToMessage(message.id, emoji) }}>{emoji}</button>)}
                                 </div>
+                                <button type="button" onClick={() => { setReplyingToMessage(message); setMessageMenuId(null); composerRef.current?.focus() }}><MessageCircle aria-hidden="true" /> Reply</button>
                                 {mine ? <>
                                   <button type="button" onClick={() => { setEditingMessageId(message.id); setEditDraft(message.body); setMessageMenuId(null) }}><Pencil aria-hidden="true" /> Edit</button>
                                   <button type="button" onClick={() => void removeMessage(message.id)}><Trash2 aria-hidden="true" /> Delete for everyone</button>
@@ -735,12 +769,14 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                         {message.reactions.length ? <div className="message-reactions" aria-label="Message reactions">{message.reactions.map((reaction) => <button type="button" key={reaction.emoji} aria-pressed={reaction.reacted} onClick={() => void reactToMessage(message.id, reaction.emoji)}>{reaction.emoji}<span>{reaction.count}</span></button>)}</div> : null}
                       </div>
                     </article>
+                    </Fragment>
                   )
                 })}
                 {!messages.length && !messagesError ? <div className="first-message-note">This is the beginning of your conversation. Say hello.</div> : null}
                 <div ref={tailRef} />
               </div>
               <form className="composer" onSubmit={submitMessage}>
+                {replyingToMessage ? <div className="composer-reply-preview" role="status"><span><strong>Replying to {replyingToMessage.senderName}</strong><small>{replyingToMessage.body || (replyingToMessage.attachments.length ? 'Attachment' : 'Message')}</small></span><button type="button" aria-label="Cancel reply" onClick={() => setReplyingToMessage(null)}><X aria-hidden="true" /></button></div> : null}
                 {selectedFiles.length ? (
                   <div className="attachment-queue" aria-label="Files attached to your message">
                     {selectedFiles.map((file, index) => (
@@ -829,6 +865,19 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
         </section>
       )}
 
+      {view === 'chats' && selectedConversation?.isGroup && membersPanelOpen ? (
+        <ConversationMembersPanel
+          conversationId={selectedConversation.id}
+          groupName={selectedConversation.name}
+          description={selectedConversation.description}
+          onClose={() => setMembersPanelOpen(false)}
+          onProfileClick={(memberId) => {
+            const person = initialData.contacts.find((contact) => contact.id === memberId)
+            if (person) setProfileCardPerson(person)
+          }}
+        />
+      ) : null}
+
       {profileCardPerson ? (
         <ProfileCardDialog
           person={profileCardPerson}
@@ -851,7 +900,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
       ) : dialog ? (
         <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setDialog(null); setError('') } }}>
           <section className="dialog-card" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
-            <header className="dialog-header"><div><p className="inbox-kicker">MORROW</p><h2 id="dialog-title">{dialog === 'new-chat' ? 'Start a conversation' : dialog === 'new-group' ? 'Create a group' : 'Share an update'}</h2></div><button className="icon-button" type="button" aria-label="Close" onClick={() => { setDialog(null); setError('') }}><X aria-hidden="true" /></button></header>
+            <header className="dialog-header"><div><p className="inbox-kicker">F.R.I.E.N.D.S</p><h2 id="dialog-title">{dialog === 'new-chat' ? 'Start a conversation' : dialog === 'new-group' ? 'Create a group' : 'Share an update'}</h2></div><button className="icon-button" type="button" aria-label="Close" onClick={() => { setDialog(null); setError('') }}><X aria-hidden="true" /></button></header>
             {dialog === 'new-chat' ? (
               <form className="dialog-form" onSubmit={submitNewConversation}>
                 <label htmlFor="recipient-email">Their account email</label>

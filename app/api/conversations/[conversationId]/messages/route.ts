@@ -55,6 +55,20 @@ export async function GET(
     .orderBy(desc(messages.createdAt))
     .limit(120)
 
+  const replyIds = Array.from(new Set(rows.flatMap((row) => row.replyToMessageId ? [row.replyToMessageId] : [])))
+  const replyRows = replyIds.length
+    ? await db.select({ id: messages.id, senderName: users.name, body: messages.body })
+      .from(messages)
+      .innerJoin(users, eq(users.id, messages.senderId))
+      .where(and(
+        eq(messages.conversationId, conversationId),
+        inArray(messages.id, replyIds),
+        isNull(messages.deletedAt),
+        or(isNull(messages.expiresAt), gt(messages.expiresAt, now)),
+      ))
+    : []
+  const repliesById = new Map(replyRows.map((row) => [row.id, { id: row.id, senderName: row.senderName, body: row.body.slice(0, 300) }]))
+
   const attachmentRows = rows.length
     ? await db
         .select({
@@ -126,6 +140,7 @@ export async function GET(
   return NextResponse.json(rows.reverse().map((row) => ({
     ...row,
     senderImage: profileImageUrl(row.senderImage, row.senderId),
+    replyTo: row.replyToMessageId ? repliesById.get(row.replyToMessageId) ?? null : null,
     attachments: (attachmentsByMessage.get(row.id) ?? []).map((attachment) => ({
       id: attachment.id,
       filename: attachment.filename,

@@ -4,7 +4,7 @@ import './globals.css'
 
 export const metadata: Metadata = {
   title: 'F.R.I.E.N.D.S — chats, status, and profile cards',
-  description: 'Private conversations, disappearing status updates, and customizable profile cards for your community.',
+  description: 'Private direct messages, group conversations, short-lived updates, and expressive profile customization for F.R.I.E.N.D.S.',
   applicationName: 'F.R.I.E.N.D.S',
   icons: {
     icon: [{ url: '/friends-wordmark.png', type: 'image/png' }],
@@ -14,7 +14,7 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   colorScheme: 'dark light',
-  themeColor: '#09150f',
+  themeColor: '#0b0d16',
   width: 'device-width',
   initialScale: 1,
   userScalable: true,
