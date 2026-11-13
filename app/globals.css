@@ -203,6 +203,9 @@
 .message-sender { margin-left: 8px; color: #688075; font-size: 10px; }
 .message-bubble { position: relative; display: flex; min-width: 70px; align-items: flex-end; gap: 11px; padding: 10px 12px 8px; border: 1px solid #ebefeb; border-radius: 5px 15px 15px 15px; background: #fff; box-shadow: 0 2px 4px #2d453708; }
 .message-bubble p { margin: 0; color: #111b21; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.message-reply-quote { display: flex; min-width: 0; flex-direction: column; gap: 3px; padding: 6px 8px; border-left: 2px solid #8b74e8; border-radius: 5px; background: #f1f2f7; color: #687780; }
+.message-reply-quote strong { color: #6252ae; font-size: 9px; }
+.message-reply-quote span { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
 .message-meta { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-left: auto; }
 .message-bubble time { color: #667781; font-size: 8px; white-space: nowrap; }
 .edited-label { color: #7a8b91; }
@@ -227,6 +230,13 @@
 .message-load-error { align-self: center; padding: 7px 11px; border-radius: 99px; background: #fff5e9; color: #936438; font-size: 10px; }
 .first-message-note { align-self: center; margin-top: 8px; padding: 8px 12px; border: 1px solid #e5ece6; border-radius: 10px; background: #ffffffc9; color: #87948d; font-size: 10px; }
 .composer { display: flex; min-height: 72px; align-items: center; gap: 10px; padding: 12px clamp(14px, 3vw, 35px); border-top: 1px solid #e6ece7; background: #fbfcfb; }
+.composer-reply-preview { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 9px; border: 1px solid #e3e8e4; border-radius: 10px; background: #f4f7f5; }
+.composer-reply-preview > span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.composer-reply-preview strong { color: #6252ae; font-size: 9px; }
+.composer-reply-preview small { overflow: hidden; color: #718078; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.composer-reply-preview button { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 8px; background: transparent; color: #718078; }
+.composer-reply-preview button:hover { background: #e6ece8; }
+.composer-reply-preview button svg { width: 15px; height: 15px; }
 .composer-field { display: flex; min-height: 44px; flex: 1; align-items: center; gap: 11px; padding: 0 14px; border: 1px solid #edf0ee; border-radius: 13px; background: #fff; color: #8a9991; }
 .composer-field:focus-within { border-color: #b9dacc; box-shadow: 0 0 0 3px #18866c0b; }
 .composer-field svg { width: 18px; height: 18px; flex: 0 0 auto; stroke-width: 1.7; }
@@ -1449,3 +1459,10 @@
 @media (prefers-reduced-motion: reduce) {
   .member-panel-person, .member-panel-close { transition: none; }
 }
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .message-reply-quote { border-color: #a18bff; background: #202c33; color: #aebac1; }
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .message-reply-quote strong,
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .composer-reply-preview strong { color: #b5a5ff; }
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .composer-reply-preview { border-color: #34434a; background: #202c33; }
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .composer-reply-preview small,
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .composer-reply-preview button { color: #aebac1; }
+:is(.messenger-shell[data-theme='dark'], .messenger-shell[data-theme='central'], .messenger-shell[data-theme='midnight']) .composer-reply-preview button:hover { background: #34434a; }

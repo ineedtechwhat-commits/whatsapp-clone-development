@@ -185,6 +185,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null)
   const [chatFilter, setChatFilter] = useState<'all' | 'unread' | 'groups'>('all')
   const [messageMenuId, setMessageMenuId] = useState<string | null>(null)
+  const [replyingToMessage, setReplyingToMessage] = useState<ChatMessage | null>(null)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [editDraft, setEditDraft] = useState('')
   const [draft, setDraft] = useState('')
@@ -253,6 +254,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
     setEditingMessageId(null)
     setEditDraft('')
     setMessageMenuId(null)
+    setReplyingToMessage(null)
     setSelectedFiles([])
     setEmojiPickerOpen(false)
     setError('')
@@ -279,11 +281,12 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
           )
           uploadedFiles.push({ pathname: blob.pathname, filename: file.name })
         }
-        await sendMessageWithAttachmentsAction(selectedId, draft, uploadedFiles)
+        await sendMessageWithAttachmentsAction(selectedId, draft, uploadedFiles, replyingToMessage?.conversationId === selectedId ? replyingToMessage.id : null)
       } else {
-        await sendMessageAction(selectedId, draft)
+        await sendMessageAction(selectedId, draft, replyingToMessage?.conversationId === selectedId ? replyingToMessage.id : null)
       }
       setDraft('')
+      setReplyingToMessage(null)
       setSelectedFiles([])
       setEmojiPickerOpen(false)
       await refreshMessages()
@@ -736,6 +739,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                           </form>
                         ) : (
                           <div className="message-bubble">
+                            {message.replyToMessageId ? <div className="message-reply-quote"><strong>{message.replyTo?.senderName ?? 'Original message'}</strong><span>{message.replyTo ? message.replyTo.body || 'Attachment' : 'This message is no longer available.'}</span></div> : null}
                             {message.body ? <p>{message.body}</p> : null}
                             {message.attachments.length ? <div className="message-attachments">{message.attachments.map((attachment) => <MessageAttachmentCard key={attachment.id} attachment={attachment} />)}</div> : null}
                             <div className="message-meta"><time>{timeLabel(message.createdAt)}{message.editedAt ? <span className="edited-label"> · edited</span> : null}</time>{mine && (selectedConversation.isGroup || initialData.preferences.readReceipts) ? <span className="message-receipt" title={`${message.readCount} read · ${message.deliveryCount} delivered`}><CheckCheck className="message-check" aria-label={`${message.readCount} read`} />{message.readCount ? <small>{message.readCount}</small> : null}</span> : null}</div>
@@ -749,6 +753,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                                 <div className="message-reaction-options" role="group" aria-label="React to message">
                                   {['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => <button type="button" key={emoji} aria-label={`React with ${emoji}`} onClick={() => { setMessageMenuId(null); void reactToMessage(message.id, emoji) }}>{emoji}</button>)}
                                 </div>
+                                <button type="button" onClick={() => { setReplyingToMessage(message); setMessageMenuId(null); composerRef.current?.focus() }}><MessageCircle aria-hidden="true" /> Reply</button>
                                 {mine ? <>
                                   <button type="button" onClick={() => { setEditingMessageId(message.id); setEditDraft(message.body); setMessageMenuId(null) }}><Pencil aria-hidden="true" /> Edit</button>
                                   <button type="button" onClick={() => void removeMessage(message.id)}><Trash2 aria-hidden="true" /> Delete for everyone</button>
@@ -771,6 +776,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                 <div ref={tailRef} />
               </div>
               <form className="composer" onSubmit={submitMessage}>
+                {replyingToMessage ? <div className="composer-reply-preview" role="status"><span><strong>Replying to {replyingToMessage.senderName}</strong><small>{replyingToMessage.body || (replyingToMessage.attachments.length ? 'Attachment' : 'Message')}</small></span><button type="button" aria-label="Cancel reply" onClick={() => setReplyingToMessage(null)}><X aria-hidden="true" /></button></div> : null}
                 {selectedFiles.length ? (
                   <div className="attachment-queue" aria-label="Files attached to your message">
                     {selectedFiles.map((file, index) => (

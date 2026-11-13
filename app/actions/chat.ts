@@ -2,7 +2,7 @@
 
 import { del, head } from '@vercel/blob'
 import { randomUUID } from 'node:crypto'
-import { and, asc, eq, inArray, isNull, ne, or } from 'drizzle-orm'
+import { and, asc, eq, gt, inArray, isNull, ne, or } from 'drizzle-orm'
 import { db } from '@/lib/db'
 import {
   accounts,
@@ -183,7 +183,23 @@ export async function createGroupConversationAction(titleInput: string, memberEm
   return conversationId
 }
 
-export async function sendMessageAction(conversationId: string, bodyInput: string) {
+async function getReplyToMessageId(conversationId: string, input: unknown): Promise<string | null> {
+  if (input === undefined || input === null) return null
+  if (typeof input !== 'string') throw new Error('The message you are replying to is no longer available.')
+  const messageId = input.trim()
+  if (!messageId) return null
+  if (messageId.length > 80) throw new Error('The message you are replying to is no longer available.')
+  const [message] = await db.select({ id: messages.id }).from(messages).where(and(
+    eq(messages.id, messageId),
+    eq(messages.conversationId, conversationId),
+    isNull(messages.deletedAt),
+    or(isNull(messages.expiresAt), gt(messages.expiresAt, new Date())),
+  )).limit(1)
+  if (!message) throw new Error('The message you are replying to is no longer available.')
+  return message.id
+}
+
+export async function sendMessageAction(conversationId: string, bodyInput: string, replyToMessageIdInput?: string | null) {
   const userId = await requireUserId()
   const conversation = conversationId.trim()
   const body = bodyInput.trim()
@@ -197,6 +213,7 @@ export async function sendMessageAction(conversationId: string, bodyInput: strin
     .limit(1)
   if (!membership) throw new Error('Conversation not found.')
   await ensureConversationNotBlocked(conversation, userId)
+  const replyToMessageId = await getReplyToMessageId(conversation, replyToMessageIdInput)
 
   const [profile] = await db
     .select({ defaultMessageTimer: userProfiles.defaultMessageTimer })
@@ -218,6 +235,7 @@ export async function sendMessageAction(conversationId: string, bodyInput: strin
       conversationId: conversation,
       senderId: userId,
       body,
+      replyToMessageId,
       expiresAt: duration ? new Date(now.getTime() + duration) : null,
     })
     await tx.update(conversations).set({ updatedAt: now }).where(eq(conversations.id, conversation))
@@ -235,6 +253,7 @@ export async function sendMessageWithAttachmentsAction(
   conversationIdInput: string,
   bodyInput: string,
   filesInput: UploadedAttachmentInput[],
+  replyToMessageIdInput?: string | null,
 ) {
   const userId = await requireUserId()
   const conversationId = typeof conversationIdInput === 'string' ? conversationIdInput.trim() : ''
@@ -251,6 +270,7 @@ export async function sendMessageWithAttachmentsAction(
     .limit(1)
   if (!membership) throw new Error('Conversation not found.')
   await ensureConversationNotBlocked(conversationId, userId)
+  const replyToMessageId = await getReplyToMessageId(conversationId, replyToMessageIdInput)
 
   const expectedPrefix = `users/${userId}/messages/${conversationId}/`
   const seenPathnames = new Set<string>()
@@ -301,6 +321,7 @@ export async function sendMessageWithAttachmentsAction(
         conversationId,
         senderId: userId,
         body: body || fallbackBody,
+        replyToMessageId,
         expiresAt: duration ? new Date(now.getTime() + duration) : null,
       })
       if (verifiedFiles.length) {
