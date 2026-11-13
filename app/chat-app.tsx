@@ -13,6 +13,7 @@ import {
   MessageCircle,
   MoreHorizontal,
   Paperclip,
+  Pin,
   ImagePlus,
   Moon,
   Pencil,
@@ -36,6 +37,7 @@ import {
   createStatusAction,
   deleteMessageAction,
   editMessageAction,
+  toggleMessagePinAction,
   sendMessageAction,
   sendMessageWithAttachmentsAction,
   discardMediaUploadsAction,
@@ -339,6 +341,22 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
     }
   }
 
+  async function toggleMessagePin(messageId: string) {
+    if (pending) return
+    setPending(true)
+    setError('')
+    try {
+      const pinned = await toggleMessagePinAction(messageId)
+      setMessageMenuId(null)
+      setMessageNotice(pinned ? 'Message pinned to this conversation.' : 'Message unpinned.')
+      await refreshMessages()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'This message could not be pinned.')
+    } finally {
+      setPending(false)
+    }
+  }
+
   async function reportMessage(messageId: string) {
     if (pending) return
     setPending(true)
@@ -590,6 +608,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
   }
 
   const activeStatus = initialData.statuses.find((group) => group.userId === selectedStatusId) ?? null
+  const pinnedMessages = messages.filter((message) => Boolean(message.pinnedAt))
 
   return (
     <main className={`messenger-shell${mobileThreadOpen ? ' thread-open' : ''}${view === 'chats' && selectedConversation?.isGroup && membersPanelOpen ? ' has-members-panel' : ''}`} data-theme={theme}>
@@ -713,6 +732,10 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                   <button className="group-details-button" type="button" onClick={() => setGroupManagementId(selectedConversation.id)}><Settings2 aria-hidden="true" /><span>Manage</span></button>
                 </> : null}
               </header>
+              {pinnedMessages.length ? <div className="pinned-message-strip" role="group" aria-label={`Pinned messages, ${pinnedMessages.length} of 3`}>
+                <span className="pinned-message-label"><Pin aria-hidden="true" /><strong>Pinned</strong><small>{pinnedMessages.length}/3</small></span>
+                <div className="pinned-message-list">{pinnedMessages.map((message) => <button type="button" key={message.id} onClick={() => { setSelectedMessageId(message.id); document.getElementById(`message-${message.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }} aria-label={`Jump to pinned message from ${message.senderName}`}><span>{message.body || (message.attachments.length ? 'Attachment' : 'Message')}</span><small>{message.senderName}</small></button>)}</div>
+              </div> : null}
               <div className="message-history" role="log" aria-live="polite" aria-label={`Messages with ${selectedConversation.name}`}>
                 {messagesError ? <div className="message-load-error">Messages could not be refreshed. Your conversation is still available.</div> : null}
                 {messages.map((message, index) => {
@@ -742,7 +765,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                             {message.replyToMessageId ? <div className="message-reply-quote"><strong>{message.replyTo?.senderName ?? 'Original message'}</strong><span>{message.replyTo ? message.replyTo.body || 'Attachment' : 'This message is no longer available.'}</span></div> : null}
                             {message.body ? <p>{message.body}</p> : null}
                             {message.attachments.length ? <div className="message-attachments">{message.attachments.map((attachment) => <MessageAttachmentCard key={attachment.id} attachment={attachment} />)}</div> : null}
-                            <div className="message-meta"><time>{timeLabel(message.createdAt)}{message.editedAt ? <span className="edited-label"> · edited</span> : null}</time>{mine && (selectedConversation.isGroup || initialData.preferences.readReceipts) ? <span className="message-receipt" title={`${message.readCount} read · ${message.deliveryCount} delivered`}><CheckCheck className="message-check" aria-label={`${message.readCount} read`} />{message.readCount ? <small>{message.readCount}</small> : null}</span> : null}</div>
+                            <div className="message-meta">{message.pinnedAt ? <span className="message-pinned-indicator" title="Pinned message"><Pin aria-label="Pinned message" /></span> : null}<time>{timeLabel(message.createdAt)}{message.editedAt ? <span className="edited-label"> · edited</span> : null}</time>{mine && (selectedConversation.isGroup || initialData.preferences.readReceipts) ? <span className="message-receipt" title={`${message.readCount} read · ${message.deliveryCount} delivered`}><CheckCheck className="message-check" aria-label={`${message.readCount} read`} />{message.readCount ? <small>{message.readCount}</small> : null}</span> : null}</div>
                           </div>
                         )}
                         {!editing ? (
@@ -753,6 +776,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                                 <div className="message-reaction-options" role="group" aria-label="React to message">
                                   {['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => <button type="button" key={emoji} aria-label={`React with ${emoji}`} onClick={() => { setMessageMenuId(null); void reactToMessage(message.id, emoji) }}>{emoji}</button>)}
                                 </div>
+                                <button type="button" onClick={() => void toggleMessagePin(message.id)} disabled={pending}><Pin aria-hidden="true" /> {message.pinnedAt ? 'Unpin message' : 'Pin message'}</button>
                                 <button type="button" onClick={() => { setReplyingToMessage(message); setMessageMenuId(null); composerRef.current?.focus() }}><MessageCircle aria-hidden="true" /> Reply</button>
                                 {mine ? <>
                                   <button type="button" onClick={() => { setEditingMessageId(message.id); setEditDraft(message.body); setMessageMenuId(null) }}><Pencil aria-hidden="true" /> Edit</button>
