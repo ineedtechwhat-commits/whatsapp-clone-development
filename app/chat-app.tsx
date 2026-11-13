@@ -46,8 +46,9 @@ import {
 import { submitMessageReportAction, submitUserReportAction } from '@/app/actions/admin'
 import { SettingsPanel } from '@/components/settings-panel'
 import { GroupManagementDialog } from '@/components/group-management-dialog'
+import { ProfileCardDialog } from '@/components/profile-card-dialog'
 import { formatFileSize, MessageAttachmentCard, StatusMediaPreview } from '@/components/chat-media'
-import type { ChatMessage, ConversationPreview, StatusGroup, WorkspaceData } from '@/lib/chat-types'
+import type { AppTheme, AvatarDecoration, ChatMessage, Contact, ConversationPreview, StatusGroup, WorkspaceData } from '@/lib/chat-types'
 import { MAX_CHAT_ATTACHMENTS, MAX_CHAT_FILE_BYTES, MAX_STATUS_FILE_BYTES } from '@/lib/media'
 
 type View = 'chats' | 'status'
@@ -103,12 +104,13 @@ function initials(name: string) {
   return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || '?'
 }
 
-function Avatar({ name, image, size = 'regular', ring = false, group = false }: { name: string; image: string | null; size?: 'regular' | 'large'; ring?: boolean; group?: boolean }) {
-  return (
-    <span className={`avatar avatar-${size}${ring ? ' avatar-ring' : ''}${group ? ' avatar-group' : ''}`} aria-hidden="true">
+function Avatar({ name, image, size = 'regular', ring = false, group = false, decoration = 'minimal', onClick }: { name: string; image: string | null; size?: 'regular' | 'large'; ring?: boolean; group?: boolean; decoration?: AvatarDecoration; onClick?: () => void }) {
+  const avatar = (
+    <span className={`avatar avatar-${size}${ring ? ' avatar-ring' : ''}${group ? ' avatar-group' : ''}${decoration !== 'minimal' ? ` avatar-decoration-${decoration}` : ''}`} aria-hidden="true">
       {group ? <UsersRound /> : image ? <img src={image} alt="" loading="lazy" referrerPolicy="no-referrer" /> : <span>{initials(name)}</span>}
     </span>
   )
+  return onClick ? <button className="avatar-profile-trigger" type="button" aria-label={`View ${name}'s profile`} onClick={onClick}>{avatar}</button> : avatar
 }
 
 function timeLabel(value: string) {
@@ -120,18 +122,20 @@ function timeLabel(value: string) {
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date)
 }
 
-function ChatRow({ conversation, active, onSelect }: { conversation: ConversationPreview; active: boolean; onSelect: () => void }) {
+function ChatRow({ conversation, active, onSelect, onProfileClick }: { conversation: ConversationPreview; active: boolean; onSelect: () => void; onProfileClick?: () => void }) {
   return (
-    <button className={`chat-row${active ? ' is-active' : ''}`} type="button" onClick={onSelect}>
-      <Avatar name={conversation.name} image={conversation.image} group={conversation.isGroup} />
-      <span className="chat-row-copy">
-        <span className="chat-row-top"><strong>{conversation.name}</strong><time>{timeLabel(conversation.lastMessageAt)}</time></span>
-        <span className="chat-row-bottom">
-          <span className="last-message">{conversation.lastMessage ?? 'Start the conversation'}</span>
-          {conversation.unreadCount > 0 ? <span className="unread-count">{conversation.unreadCount > 99 ? '99+' : conversation.unreadCount}</span> : null}
+    <div className={`chat-row${active ? ' is-active' : ''}`}>
+      <Avatar name={conversation.name} image={conversation.image} group={conversation.isGroup} decoration={conversation.avatarDecoration} onClick={onProfileClick} />
+      <button className="chat-row-select" type="button" onClick={onSelect} aria-label={`Open conversation with ${conversation.name}`}>
+        <span className="chat-row-copy">
+          <span className="chat-row-top"><strong>{conversation.name}</strong><time>{timeLabel(conversation.lastMessageAt)}</time></span>
+          <span className="chat-row-bottom">
+            <span className="last-message">{conversation.lastMessage ?? 'Start the conversation'}</span>
+            {conversation.unreadCount > 0 ? <span className="unread-count">{conversation.unreadCount > 99 ? '99+' : conversation.unreadCount}</span> : null}
+          </span>
         </span>
-      </span>
-    </button>
+      </button>
+    </div>
   )
 }
 
@@ -139,7 +143,7 @@ function StatusRow({ group, onSelect, onAdd }: { group: StatusGroup; onSelect: (
   return (
     <button className="status-row" type="button" onClick={group.isMe && !group.items.length ? onAdd : onSelect}>
       <span className="status-avatar-wrap">
-        <Avatar name={group.name} image={group.image} ring={group.items.length > 0} />
+        <Avatar name={group.name} image={group.image} ring={group.items.length > 0} decoration={group.avatarDecoration} />
         {group.isMe && !group.items.length ? <span className="status-add">+</span> : null}
       </span>
       <span className="status-row-copy">
@@ -151,12 +155,13 @@ function StatusRow({ group, onSelect, onAdd }: { group: StatusGroup; onSelect: (
   )
 }
 
-export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceData; initialTheme: 'dark' | 'light' }) {
+export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceData; initialTheme: AppTheme }) {
   const router = useRouter()
-  const [theme, setTheme] = useState<'dark' | 'light'>(initialTheme)
+  const [theme, setTheme] = useState<AppTheme>(initialTheme)
   const [view, setView] = useState<View>('chats')
   const [dialog, setDialog] = useState<Dialog>(null)
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('profile')
+  const [profileCardPerson, setProfileCardPerson] = useState<Contact | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(initialData.conversations[0]?.id ?? null)
   const [selectedStatusId, setSelectedStatusId] = useState<string | null>(null)
   const [filter, setFilter] = useState('')
@@ -183,6 +188,9 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
   const typingStopTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const selectedConversation = initialData.conversations.find((chat) => chat.id === selectedId) ?? null
+  const selectedConversationContact = selectedConversation && !selectedConversation.isGroup
+    ? initialData.contacts.find((contact) => contact.conversationIds.includes(selectedConversation.id)) ?? null
+    : null
   const messageUrl = selectedId ? `/api/conversations/${encodeURIComponent(selectedId)}/messages` : null
   const { data: messages = [], error: messagesError, mutate: refreshMessages } = useSWR<ChatMessage[]>(messageUrl, fetcher, {
     refreshInterval: 5000,
@@ -517,10 +525,20 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
     }
   }
 
-  function toggleTheme() {
-    const nextTheme = theme === 'dark' ? 'light' : 'dark'
+  function changeTheme(nextTheme: AppTheme) {
     setTheme(nextTheme)
     document.cookie = `morrow-theme=${nextTheme}; Path=/; Max-Age=31536000; SameSite=Lax`
+  }
+
+  function toggleTheme() {
+    changeTheme(theme === 'light' ? 'dark' : 'light')
+  }
+
+  function openProfileConversation(person: Contact) {
+    const conversation = initialData.conversations.find((item) => !item.isGroup && person.conversationIds.includes(item.id))
+    if (!conversation) return
+    setProfileCardPerson(null)
+    openConversation(conversation)
   }
 
   async function signOut() {
@@ -564,15 +582,15 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
           {initialData.user.isAdmin ? <a className="rail-button admin-rail-button" href="/admin" aria-label="Open admin console"><Crown aria-hidden="true" /><span className="rail-tooltip">Admin console</span></a> : null}
         </div>
         <div className="rail-bottom">
-          <button className="rail-button theme-toggle" type="button" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-pressed={theme === 'dark'} onClick={toggleTheme}>
-            {theme === 'dark' ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
-            <span className="rail-tooltip">Switch to {theme === 'dark' ? 'light' : 'dark'} mode</span>
+          <button className="rail-button theme-toggle" type="button" aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`} aria-pressed={theme !== 'light'} onClick={toggleTheme}>
+            {theme === 'light' ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
+            <span className="rail-tooltip">Switch to {theme === 'light' ? 'dark' : 'light'} mode</span>
           </button>
           <button className="rail-button" type="button" aria-label="Open settings" onClick={() => { setSettingsTab('privacy'); setDialog('settings') }}>
             <Settings2 aria-hidden="true" /><span className="rail-tooltip">Settings</span>
           </button>
           <button className={`rail-button${initialData.user.isAdmin ? ' creator-profile-button' : ''}`} type="button" aria-label={initialData.user.isAdmin ? 'Edit your creator profile' : 'Edit your profile'} onClick={() => { setSettingsTab('profile'); setDialog('settings') }}>
-            <span className="rail-avatar-wrap"><Avatar name={initialData.user.name} image={initialData.user.image} size="regular" />{initialData.user.isAdmin ? <Crown className="rail-admin-crown" aria-hidden="true" /> : null}</span>
+            <span className="rail-avatar-wrap"><Avatar name={initialData.user.name} image={initialData.user.image} size="regular" decoration={initialData.user.avatarDecoration} />{initialData.user.isAdmin ? <Crown className="rail-admin-crown" aria-hidden="true" /> : null}</span>
           </button>
         </div>
       </nav>
@@ -623,11 +641,14 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
 
         {view === 'chats' ? (
           <div className="inbox-list" role="list" aria-label={searchMode === 'chats' ? 'Conversation list' : `${searchMode} search results`}>
-            {searchMode === 'chats' ? filteredConversations.length ? filteredConversations.map((conversation) => (
-              <div role="listitem" key={conversation.id}>
-                <ChatRow conversation={conversation} active={selectedId === conversation.id} onSelect={() => openConversation(conversation)} />
-              </div>
-            )) : (
+            {searchMode === 'chats' ? filteredConversations.length ? filteredConversations.map((conversation) => {
+              const contact = initialData.contacts.find((person) => person.conversationIds.includes(conversation.id))
+              return (
+                <div role="listitem" key={conversation.id}>
+                  <ChatRow conversation={conversation} active={selectedId === conversation.id} onSelect={() => openConversation(conversation)} onProfileClick={contact ? () => setProfileCardPerson(contact) : undefined} />
+                </div>
+              )
+            }) : (
               <div className="list-empty">
                 <span className="empty-icon"><MessageCircle aria-hidden="true" /></span>
                 <strong>{filter ? 'No matches found' : 'Your conversations start here'}</strong>
@@ -645,7 +666,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
         ) : (
           <div className="inbox-list status-list" role="list" aria-label="Status updates">
             <div className="status-section-label">TODAY</div>
-            <StatusRow group={{ userId: initialData.user.id, name: 'You', image: initialData.user.image, isMe: true, items: initialData.statuses.find((group) => group.isMe)?.items ?? [] }} onSelect={() => setSelectedStatusId(initialData.user.id)} onAdd={() => { setError(''); setStatusMediaFile(null); setDialog('new-status') }} />
+            <StatusRow group={{ userId: initialData.user.id, name: 'You', image: initialData.user.image, avatarDecoration: initialData.user.avatarDecoration, isMe: true, items: initialData.statuses.find((group) => group.isMe)?.items ?? [] }} onSelect={() => setSelectedStatusId(initialData.user.id)} onAdd={() => { setError(''); setStatusMediaFile(null); setDialog('new-status') }} />
             {initialData.statuses.filter((group) => !group.isMe && (!filter || group.name.toLowerCase().includes(filter.toLowerCase()))).map((group) => (
               <StatusRow key={group.userId} group={group} onSelect={() => setSelectedStatusId(group.userId)} />
             ))}
@@ -662,7 +683,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
             <>
               <header className="conversation-header">
                 <button className="back-button" type="button" aria-label="Back to conversations" onClick={() => setMobileThreadOpen(false)}><ArrowLeft aria-hidden="true" /></button>
-                <Avatar name={selectedConversation.name} image={selectedConversation.image} group={selectedConversation.isGroup} />
+                <Avatar name={selectedConversation.name} image={selectedConversation.image} group={selectedConversation.isGroup} decoration={selectedConversationContact?.avatarDecoration ?? selectedConversation.avatarDecoration} onClick={selectedConversationContact ? () => setProfileCardPerson(selectedConversationContact) : undefined} />
                 <div className="conversation-heading"><h2>{selectedConversation.name}</h2><p>{activity?.typingNames.length ? `${activity.typingNames.join(', ')} typing…` : selectedConversation.isGroup ? `Group · ${selectedConversation.participantCount} members` : activity?.onlineUserIds.length ? 'online' : 'Conversation'}</p></div>
                 {selectedConversation.isGroup ? <button className="group-details-button" type="button" onClick={() => setGroupManagementId(selectedConversation.id)}><UsersRound aria-hidden="true" /><span>Details</span></button> : null}
               </header>
@@ -670,11 +691,12 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                 <div className="history-note"><span>Today</span></div>
                 {messagesError ? <div className="message-load-error">Messages could not be refreshed. Your conversation is still available.</div> : null}
                 {messages.map((message) => {
-                  const mine = message.senderId === initialData.user.id
-                  const editing = editingMessageId === message.id
-                  return (
+              const mine = message.senderId === initialData.user.id
+              const messageContact = initialData.contacts.find((contact) => contact.id === message.senderId)
+              const editing = editingMessageId === message.id
+              return (
                     <article id={`message-${message.id}`} className={`message-line${mine ? ' message-mine' : ''}${selectedMessageId === message.id ? ' message-search-highlight' : ''}`} key={message.id}>
-                      {!mine ? <Avatar name={message.senderName} image={message.senderImage} size="regular" /> : null}
+                      {!mine ? <Avatar name={message.senderName} image={message.senderImage} size="regular" decoration={messageContact?.avatarDecoration} onClick={messageContact ? () => setProfileCardPerson(messageContact) : undefined} /> : null}
                       <div className={`message-content${mine ? ' message-content-mine' : ''}`}>
                         {!mine && selectedConversation.isGroup ? <span className="message-sender">{message.senderName}</span> : null}
                         {editing ? (
@@ -785,7 +807,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
           <div className="status-detail-content">
             {activeStatus ? (
               <article className="status-card">
-                <div className="status-card-person"><Avatar name={activeStatus.name} image={activeStatus.image} ring /><div><strong>{activeStatus.name}</strong><span>{activeStatus.items.length} update{activeStatus.items.length === 1 ? '' : 's'}</span></div></div>
+                <div className="status-card-person"><Avatar name={activeStatus.name} image={activeStatus.image} ring decoration={activeStatus.avatarDecoration} /><div><strong>{activeStatus.name}</strong><span>{activeStatus.items.length} update{activeStatus.items.length === 1 ? '' : 's'}</span></div></div>
                 {activeStatus.items.map((item) => (
                   <div className="status-story" key={item.id}>
                     <StatusMediaPreview item={item} />
@@ -807,6 +829,14 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
         </section>
       )}
 
+      {profileCardPerson ? (
+        <ProfileCardDialog
+          person={profileCardPerson}
+          onClose={() => setProfileCardPerson(null)}
+          onMessage={initialData.conversations.some((item) => !item.isGroup && profileCardPerson.conversationIds.includes(item.id)) ? () => openProfileConversation(profileCardPerson) : undefined}
+        />
+      ) : null}
+
       {dialog === 'settings' ? (
         <SettingsPanel
           user={initialData.user}
@@ -814,7 +844,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
           initialTab={settingsTab}
           theme={theme}
           onClose={() => setDialog(null)}
-          onThemeToggle={toggleTheme}
+          onThemeChange={changeTheme}
           onSignOut={signOut}
           onAccountDeleted={accountDeleted}
         />

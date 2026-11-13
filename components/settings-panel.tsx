@@ -1,27 +1,20 @@
 'use client'
 
-import { useState, type ChangeEvent, type FormEvent } from 'react'
+import { useState, type FormEvent } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   ArrowDownToLine,
-  BellRing,
-  Check,
   CircleHelp,
-  Crown,
-  ImagePlus,
   LockKeyhole,
   LogOut,
   MessageCircle,
-  Moon,
   ShieldCheck,
-  Sun,
   UserRound,
   X,
 } from 'lucide-react'
-import { deleteOwnAccountAction, discardMediaUploadsAction, updatePreferencesAction, updateProfileAction, updateProfilePhotoAction } from '@/app/actions/chat'
-import { upload } from '@vercel/blob/client'
-import { MAX_PROFILE_PHOTO_BYTES, mediaUrl, PROFILE_PHOTO_TYPES } from '@/lib/media'
-import type { ChatPreferences, ChatUser, MessageTimer, Visibility } from '@/lib/chat-types'
+import { deleteOwnAccountAction, updatePreferencesAction, updateProfileAction } from '@/app/actions/chat'
+import { AvatarStudio } from '@/components/avatar-studio'
+import type { AppTheme, AvatarDecoration, ChatPreferences, ChatUser, MessageTimer, Visibility } from '@/lib/chat-types'
 
 type SettingsTab = 'profile' | 'account' | 'privacy' | 'chats' | 'help'
 
@@ -45,10 +38,6 @@ const timerOptions: Array<{ value: MessageTimer; label: string }> = [
   { value: '7d', label: '7 days' },
   { value: '90d', label: '90 days' },
 ]
-
-function initials(name: string) {
-  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || '?'
-}
 
 function SettingsSelect({
   id,
@@ -102,16 +91,16 @@ export function SettingsPanel({
   initialTab = 'profile',
   theme,
   onClose,
-  onThemeToggle,
+  onThemeChange,
   onSignOut,
   onAccountDeleted,
 }: {
   user: ChatUser
   initialPreferences: ChatPreferences
   initialTab?: SettingsTab
-  theme: 'dark' | 'light'
+  theme: AppTheme
   onClose: () => void
-  onThemeToggle: () => void
+  onThemeChange: (theme: AppTheme) => void
   onSignOut: () => void
   onAccountDeleted: () => void
 }) {
@@ -121,9 +110,10 @@ export function SettingsPanel({
   const [username, setUsername] = useState(user.username)
   const [about, setAbout] = useState(user.about)
   const [profileImage, setProfileImage] = useState(user.image)
+  const [bannerImage, setBannerImage] = useState(user.bannerImage)
+  const [avatarDecoration, setAvatarDecoration] = useState<AvatarDecoration>(user.avatarDecoration)
   const [preferences, setPreferences] = useState<ChatPreferences>(initialPreferences)
   const [pending, setPending] = useState(false)
-  const [photoPending, setPhotoPending] = useState(false)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [deleteConfirmation, setDeleteConfirmation] = useState('')
@@ -147,46 +137,6 @@ export function SettingsPanel({
       setError('Your profile could not be saved. Check the fields and try again.')
     } finally {
       setPending(false)
-    }
-  }
-
-  async function changeProfilePhoto(event: ChangeEvent<HTMLInputElement>) {
-    const input = event.currentTarget
-    const file = input.files?.[0]
-    input.value = ''
-    if (!file) return
-
-    if (!PROFILE_PHOTO_TYPES.includes(file.type as typeof PROFILE_PHOTO_TYPES[number]) || file.size > MAX_PROFILE_PHOTO_BYTES) {
-      setError('Choose a JPG, PNG, WebP, or GIF image up to 5 MB.')
-      setNotice('')
-      return
-    }
-
-    setPhotoPending(true)
-    setError('')
-    setNotice('')
-    let uploadedPathname = ''
-    try {
-      const blob = await upload(
-        `users/${user.id}/profile/${crypto.randomUUID()}`,
-        file,
-        {
-          access: 'private',
-          handleUploadUrl: '/api/media/upload',
-          clientPayload: JSON.stringify({ purpose: 'profile' }),
-          contentType: file.type,
-        },
-      )
-      uploadedPathname = blob.pathname
-      await updateProfilePhotoAction(uploadedPathname)
-      setProfileImage(mediaUrl(uploadedPathname))
-      setNotice('Your profile photo has been updated.')
-      router.refresh()
-    } catch {
-      if (uploadedPathname) await discardMediaUploadsAction([uploadedPathname]).catch(() => undefined)
-      setError('Your profile photo could not be updated. Please try again.')
-    } finally {
-      setPhotoPending(false)
     }
   }
 
@@ -253,19 +203,19 @@ export function SettingsPanel({
             {activeTab === 'profile' ? (
               <form className="settings-form" onSubmit={saveProfile}>
                 <div className="settings-section-heading"><p className="inbox-kicker">YOUR DETAILS</p><h3>Profile</h3><p>Choose how you appear to people you chat with.</p></div>
-                <div className="settings-profile-identity">
-                  <span className="settings-avatar" aria-hidden="true">{profileImage ? <img src={profileImage} alt="" referrerPolicy="no-referrer" /> : initials(name)}</span>
-                  <div className="settings-profile-copy">
-                    <strong className="settings-name-line">{name || user.name}{user.isAdmin ? <span className="admin-identity-badge"><Crown aria-hidden="true" /> ADMIN</span> : null}</strong>
-                    <small>{user.isAdmin ? 'Verified F.R.I.E.N.D.S creator' : profileImage ? 'Current profile photo' : 'Add a photo to your profile'}</small>
-                    <label className="settings-photo-button">
-                      <ImagePlus aria-hidden="true" />
-                      <span>{photoPending ? 'Uploading…' : 'Change photo'}</span>
-                      <input className="sr-only" type="file" accept="image/jpeg,image/png,image/webp,image/gif" aria-label="Choose a profile photo" aria-describedby="settings-profile-photo-help" onChange={changeProfilePhoto} disabled={pending || photoPending} />
-                    </label>
-                  </div>
-                </div>
-                <p className="settings-photo-help" id="settings-profile-photo-help">JPG, PNG, WebP, or GIF. Maximum file size: 5 MB.</p>
+                <AvatarStudio
+                  user={user}
+                  name={name}
+                  username={username}
+                  about={about}
+                  image={profileImage}
+                  bannerImage={bannerImage}
+                  avatarDecoration={avatarDecoration}
+                  onImageChange={setProfileImage}
+                  onBannerChange={setBannerImage}
+                  onDecorationChange={setAvatarDecoration}
+                  onStatus={(message, isError = false) => { setError(isError ? message : ''); setNotice(isError ? '' : message) }}
+                />
                 <label className="settings-input" htmlFor="settings-name"><span>Name</span><input id="settings-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={100} required /></label>
                 <label className="settings-input" htmlFor="settings-username"><span>Username</span><input id="settings-username" value={username} onChange={(event) => setUsername(event.target.value.replace(/^@/, ''))} maxLength={24} autoComplete="username" required /><small>People can find you by @{username || 'username'}.</small></label>
                 <label className="settings-input" htmlFor="settings-about"><span>About</span>{user.isAdmin ? <textarea id="settings-about" value={about} onChange={(event) => setAbout(event.target.value)} rows={4} required /> : <input id="settings-about" value={about} onChange={(event) => setAbout(event.target.value)} maxLength={120} required />}</label>
@@ -324,7 +274,7 @@ export function SettingsPanel({
             {activeTab === 'chats' ? (
               <form className="settings-form" onSubmit={savePreferences}>
                 <div className="settings-section-heading"><p className="inbox-kicker">CHAT PREFERENCES</p><h3>Chats</h3><p>Set the appearance and default disappearing-message timer.</p></div>
-                <div className="settings-theme-row"><span className="settings-action-icon">{theme === 'dark' ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}<span><strong>Theme</strong><small>Choose a comfortable look for your chats.</small></span></span><button className="settings-secondary-button" type="button" onClick={onThemeToggle}>Use {theme === 'dark' ? 'light' : 'dark'} theme</button></div>
+                <SettingsSelect id="theme-choice" label="Color palette" value={theme} options={[{ value: 'dark', label: 'Forest after hours' }, { value: 'central', label: 'Central Perk' }, { value: 'midnight', label: 'Midnight blue' }, { value: 'light', label: 'Daylight' }]} onChange={(value) => onThemeChange(value as AppTheme)} description="Choose an accent and background for your chats." />
                 <SettingsSelect id="privacy-message-timer" label="Default message timer" value={preferences.defaultMessageTimer} options={timerOptions} onChange={(value) => updatePreference('defaultMessageTimer', value as MessageTimer)} description="New messages you send will disappear after this time." />
                 {error ? <p className="settings-error" role="alert">{error}</p> : null}
                 {notice ? <p className="settings-notice" role="status">{notice}</p> : null}

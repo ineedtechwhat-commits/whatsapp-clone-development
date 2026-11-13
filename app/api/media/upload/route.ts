@@ -4,9 +4,9 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { conversationMembers } from '@/lib/db/schema'
 import { getSessionUser } from '@/lib/auth-session'
-import { MAX_CHAT_FILE_BYTES, MAX_PROFILE_PHOTO_BYTES, MAX_STATUS_FILE_BYTES, PROFILE_PHOTO_TYPES, STATUS_MEDIA_TYPES } from '@/lib/media'
+import { MAX_CHAT_FILE_BYTES, MAX_PROFILE_BANNER_BYTES, MAX_PROFILE_PHOTO_BYTES, MAX_STATUS_FILE_BYTES, PROFILE_PHOTO_TYPES, STATUS_MEDIA_TYPES } from '@/lib/media'
 
-type UploadPurpose = 'message' | 'status' | 'profile'
+type UploadPurpose = 'message' | 'status' | 'profile' | 'banner'
 type UploadClientPayload = {
   purpose: UploadPurpose
   conversationId?: string
@@ -18,7 +18,7 @@ function parseClientPayload(value: string | null | undefined): UploadClientPaylo
     const parsed: unknown = JSON.parse(value)
     if (!parsed || typeof parsed !== 'object' || !('purpose' in parsed)) return null
     const payload = parsed as UploadClientPayload
-    if (payload.purpose !== 'message' && payload.purpose !== 'status' && payload.purpose !== 'profile') return null
+    if (payload.purpose !== 'message' && payload.purpose !== 'status' && payload.purpose !== 'profile' && payload.purpose !== 'banner') return null
     return payload
   } catch {
     return null
@@ -61,15 +61,15 @@ export async function POST(request: Request) {
           }
         }
 
-        if (payload.purpose === 'profile') {
+        if (payload.purpose === 'profile' || payload.purpose === 'banner') {
           const expectedPrefix = `users/${user.id}/profile/`
           if (!pathname.startsWith(expectedPrefix) || pathname.slice(expectedPrefix.length).includes('/')) {
-            throw new Error('Invalid profile photo upload.')
+            throw new Error(payload.purpose === 'banner' ? 'Invalid profile banner upload.' : 'Invalid profile photo upload.')
           }
 
           return {
             allowedContentTypes: [...PROFILE_PHOTO_TYPES],
-            maximumSizeInBytes: MAX_PROFILE_PHOTO_BYTES,
+            maximumSizeInBytes: payload.purpose === 'banner' ? MAX_PROFILE_BANNER_BYTES : MAX_PROFILE_PHOTO_BYTES,
             addRandomSuffix: true,
             validUntil: Date.now() + 10 * 60 * 1000,
           }

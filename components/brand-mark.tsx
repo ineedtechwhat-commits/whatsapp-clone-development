@@ -9,7 +9,7 @@ type BrandMarkProps = {
 export function BrandMark({ className }: BrandMarkProps) {
   return (
     <Image
-      src="/friends-app-icon.png"
+      src="/friends-wordmark.png"
       alt=""
       aria-hidden="true"
       className={className}
