@@ -20,6 +20,14 @@ export type ChatUser = {
   emailVerified: boolean
   image: string | null
   about: string
+  isAdmin: boolean
+}
+
+export type PlatformAnnouncement = {
+  id: string
+  title: string
+  body: string
+  createdAt: string
 }
 
 export type Contact = {
@@ -86,4 +94,5 @@ export type WorkspaceData = {
   conversations: ConversationPreview[]
   contacts: Contact[]
   statuses: StatusGroup[]
+  announcement: PlatformAnnouncement | null
 }

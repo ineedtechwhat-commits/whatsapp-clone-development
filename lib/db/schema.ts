@@ -1,4 +1,4 @@
-import { boolean, index, integer, pgTable, text, timestamp, unique } from 'drizzle-orm/pg-core'
+import { boolean, index, integer, jsonb, pgTable, text, timestamp, unique } from 'drizzle-orm/pg-core'
 
 export const users = pgTable('user', {
   id: text('id').primaryKey(),
@@ -135,3 +135,16 @@ export const messageAttachments = pgTable(
     index('message_attachment_conversation_idx').on(table.conversationId),
   ],
 )
+
+export const adminControlRecords = pgTable('admin_control_records', {
+  id: text('id').primaryKey(),
+  recordType: text('record_type').notNull(),
+  roleUserId: text('role_user_id').unique(),
+  actorUserId: text('actor_user_id'),
+  subjectUserId: text('subject_user_id'),
+  action: text('action').notNull(),
+  status: text('status').notNull().default('active'),
+  payload: jsonb('payload').$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+})

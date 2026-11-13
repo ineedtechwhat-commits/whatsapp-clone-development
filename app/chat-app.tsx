@@ -7,6 +7,8 @@ import {
   ArrowLeft,
   CheckCheck,
   CircleDot,
+  Crown,
+  Flag,
   MessageCircle,
   MoreHorizontal,
   Paperclip,
@@ -37,6 +39,7 @@ import {
   sendMessageWithAttachmentsAction,
   discardMediaUploadsAction,
 } from '@/app/actions/chat'
+import { submitMessageReportAction, submitUserReportAction } from '@/app/actions/admin'
 import { SettingsPanel } from '@/components/settings-panel'
 import { formatFileSize, MessageAttachmentCard, StatusMediaPreview } from '@/components/chat-media'
 import type { ChatMessage, ConversationPreview, StatusGroup, WorkspaceData } from '@/lib/chat-types'
@@ -126,6 +129,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
+  const [messageNotice, setMessageNotice] = useState('')
   const [mobileThreadOpen, setMobileThreadOpen] = useState(Boolean(initialData.conversations[0]))
   const tailRef = useRef<HTMLDivElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
@@ -238,6 +242,38 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
       router.refresh()
     } catch {
       setError('This message could not be deleted. Please try again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function reportMessage(messageId: string) {
+    if (pending) return
+    setPending(true)
+    setError('')
+    setMessageNotice('')
+    try {
+      await submitMessageReportAction(messageId, 'Reported from a conversation')
+      setMessageMenuId(null)
+      setMessageNotice('Thanks. Your report was sent to the moderation team.')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'This message could not be reported.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function reportUser(userId: string) {
+    if (pending) return
+    setPending(true)
+    setError('')
+    setMessageNotice('')
+    try {
+      await submitUserReportAction(userId, 'Reported from a conversation')
+      setMessageMenuId(null)
+      setMessageNotice('Thanks. Your account report was sent to the moderation team.')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'This account could not be reported.')
     } finally {
       setPending(false)
     }
@@ -374,6 +410,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
           <button className={`rail-button${view === 'status' ? ' selected' : ''}`} type="button" aria-label="Status updates" aria-pressed={view === 'status'} onClick={() => setView('status')}>
             <CircleDot aria-hidden="true" /><span className="rail-tooltip">Updates</span>
           </button>
+          {initialData.user.isAdmin ? <a className="rail-button admin-rail-button" href="/admin" aria-label="Open admin console"><Crown aria-hidden="true" /><span className="rail-tooltip">Admin console</span></a> : null}
         </div>
         <div className="rail-bottom">
           <button className="rail-button theme-toggle" type="button" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-pressed={theme === 'dark'} onClick={toggleTheme}>
@@ -383,8 +420,8 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
           <button className="rail-button" type="button" aria-label="Open settings" onClick={() => { setSettingsTab('privacy'); setDialog('settings') }}>
             <Settings2 aria-hidden="true" /><span className="rail-tooltip">Settings</span>
           </button>
-          <button className="rail-button" type="button" aria-label="Edit your profile" onClick={() => { setSettingsTab('profile'); setDialog('settings') }}>
-            <Avatar name={initialData.user.name} image={initialData.user.image} size="regular" />
+          <button className={`rail-button${initialData.user.isAdmin ? ' creator-profile-button' : ''}`} type="button" aria-label={initialData.user.isAdmin ? 'Edit your creator profile' : 'Edit your profile'} onClick={() => { setSettingsTab('profile'); setDialog('settings') }}>
+            <span className="rail-avatar-wrap"><Avatar name={initialData.user.name} image={initialData.user.image} size="regular" />{initialData.user.isAdmin ? <Crown className="rail-admin-crown" aria-hidden="true" /> : null}</span>
           </button>
         </div>
       </nav>
@@ -414,6 +451,9 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
             </div>
           ) : null}
         </header>
+
+        {initialData.announcement ? <aside className="platform-announcement" aria-label="Platform announcement"><strong>{initialData.announcement.title}</strong><p>{initialData.announcement.body}</p></aside> : null}
+        {messageNotice ? <p className="inline-notice" role="status">{messageNotice}</p> : null}
 
         {view === 'chats' ? (
           <div className="inbox-list" role="list" aria-label="Conversation list">
@@ -477,13 +517,18 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                             <div className="message-meta"><time>{timeLabel(message.createdAt)}{message.editedAt ? <span className="edited-label"> · edited</span> : null}</time>{mine && (selectedConversation.isGroup || initialData.preferences.readReceipts) ? <CheckCheck className="message-check" aria-label="Sent" /> : null}</div>
                           </div>
                         )}
-                        {mine && !editing ? (
+                        {!editing ? (
                           <div className="message-options">
-                            <button className="message-more-button" type="button" aria-label={`More options for your message`} aria-expanded={messageMenuId === message.id} onClick={() => setMessageMenuId((current) => current === message.id ? null : message.id)}><MoreHorizontal aria-hidden="true" /></button>
+                            <button className="message-more-button" type="button" aria-label={`More options for ${mine ? 'your' : `${message.senderName}'s`} message`} aria-expanded={messageMenuId === message.id} onClick={() => setMessageMenuId((current) => current === message.id ? null : message.id)}><MoreHorizontal aria-hidden="true" /></button>
                             {messageMenuId === message.id ? (
                               <div className="message-menu" role="group" aria-label="Message actions">
-                                <button type="button" onClick={() => { setEditingMessageId(message.id); setEditDraft(message.body); setMessageMenuId(null) }}><Pencil aria-hidden="true" /> Edit</button>
-                                <button type="button" onClick={() => void removeMessage(message.id)}><Trash2 aria-hidden="true" /> Delete for everyone</button>
+                                {mine ? <>
+                                  <button type="button" onClick={() => { setEditingMessageId(message.id); setEditDraft(message.body); setMessageMenuId(null) }}><Pencil aria-hidden="true" /> Edit</button>
+                                  <button type="button" onClick={() => void removeMessage(message.id)}><Trash2 aria-hidden="true" /> Delete for everyone</button>
+                                </> : <>
+                                  <button type="button" onClick={() => void reportMessage(message.id)} disabled={pending}><Flag aria-hidden="true" /> Report message</button>
+                                  <button type="button" onClick={() => void reportUser(message.senderId)} disabled={pending}><Flag aria-hidden="true" /> Report account</button>
+                                </>}
                               </div>
                             ) : null}
                           </div>

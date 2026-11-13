@@ -7,8 +7,10 @@ import {
   statuses,
   userProfiles,
   users,
+  adminControlRecords,
 } from '@/lib/db/schema'
 import { getSessionUser } from '@/lib/auth-session'
+import { getUserAccessState } from '@/lib/admin-auth'
 import { profileImageUrl } from '@/lib/media'
 import type { ChatPreferences, ChatUser, ConversationPreview, Contact, StatusGroup, MessageTimer, Visibility } from '@/lib/chat-types'
 
@@ -23,8 +25,9 @@ function messageTimerPreference(value: string | undefined): MessageTimer {
 export async function getWorkspaceData() {
   const sessionUser = await getSessionUser()
   if (!sessionUser) throw new Error('Unauthorized')
+  const access = await getUserAccessState(sessionUser.id)
 
-  const defaultAbout = sessionUser.email.toLowerCase() === 'whatwhenwhyyouwant@gmail.com' ? 'App creator and admin' : 'Available'
+  const defaultAbout = access.isAdmin ? 'F.R.I.E.N.D.S creator' : 'Available'
   await db
     .insert(userProfiles)
     .values({ userId: sessionUser.id, about: defaultAbout })
@@ -54,6 +57,7 @@ export async function getWorkspaceData() {
     emailVerified: Boolean(sessionUser.emailVerified),
     image: profileImageUrl(sessionUser.image ?? null, sessionUser.id),
     about: profile?.about ?? defaultAbout,
+    isAdmin: access.isAdmin,
   }
 
   const preferences: ChatPreferences = {
@@ -228,11 +232,23 @@ export async function getWorkspaceData() {
     a.isMe === b.isMe ? a.name.localeCompare(b.name) : a.isMe ? -1 : 1,
   )
 
+  const [announcementRecord] = await db.select({ id: adminControlRecords.id, payload: adminControlRecords.payload, createdAt: adminControlRecords.createdAt })
+    .from(adminControlRecords)
+    .where(and(eq(adminControlRecords.recordType, 'announcement'), eq(adminControlRecords.status, 'active')))
+    .orderBy(desc(adminControlRecords.createdAt))
+    .limit(1)
+  const announcementTitle = announcementRecord?.payload.title
+  const announcementBody = announcementRecord?.payload.body
+  const announcement = announcementRecord && typeof announcementTitle === 'string' && typeof announcementBody === 'string'
+    ? { id: announcementRecord.id, title: announcementTitle, body: announcementBody, createdAt: announcementRecord.createdAt.toISOString() }
+    : null
+
   return {
     user,
     preferences,
     conversations: conversationsList,
     contacts: Array.from(contactsById.values()).sort((a, b) => a.name.localeCompare(b.name)),
     statuses: statusesList,
+    announcement,
   }
 }

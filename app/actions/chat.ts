@@ -17,6 +17,7 @@ import {
   verifications,
 } from '@/lib/db/schema'
 import { getSessionUser } from '@/lib/auth-session'
+import { isAdminUserId } from '@/lib/admin-auth'
 import type { ChatPreferences, MessageTimer, Visibility } from '@/lib/chat-types'
 import { isProfilePhotoPathname, MAX_CHAT_ATTACHMENTS, MAX_CHAT_FILE_BYTES, MAX_PROFILE_PHOTO_BYTES, MAX_STATUS_FILE_BYTES, PROFILE_PHOTO_TYPES, STATUS_MEDIA_TYPES, safeDisplayName } from '@/lib/media'
 
@@ -412,10 +413,13 @@ export async function updateProfilePhotoAction(pathnameInput: string) {
 
 export async function updateProfileAction(nameInput: string, aboutInput: string) {
   const userId = await requireUserId()
+  const isAdmin = await isAdminUserId(userId)
   const name = nameInput.trim().replace(/\s+/g, ' ')
   const about = aboutInput.trim()
   if (name.length < 1 || name.length > 100) throw new Error('Name must be between 1 and 100 characters.')
-  if (about.length < 1 || about.length > 120) throw new Error('About text must be between 1 and 120 characters.')
+  if (about.length < 1 || (!isAdmin && about.length > 120)) {
+    throw new Error(isAdmin ? 'About text cannot be empty.' : 'About text must be between 1 and 120 characters.')
+  }
 
   await db.transaction(async (tx) => {
     await tx.update(users).set({ name, updatedAt: new Date() }).where(eq(users.id, userId))

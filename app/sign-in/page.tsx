@@ -1,12 +1,13 @@
-import { headers } from 'next/headers'
 import { redirect } from 'next/navigation'
-import { auth } from '@/lib/auth'
+import { getRawSessionUser, getSessionUser } from '@/lib/admin-auth'
 import { BrandMark } from '@/components/brand-mark'
 import { AuthForm } from './auth-form'
 
 export default async function SignInPage() {
-  const session = await auth.api.getSession({ headers: await headers() })
-  if (session?.user) redirect('/')
+  if (await getRawSessionUser()) {
+    if (!(await getSessionUser())) redirect('/account-restricted')
+    redirect('/')
+  }
 
   return (
     <main className="auth-screen">
