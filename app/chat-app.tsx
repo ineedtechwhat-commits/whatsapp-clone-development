@@ -69,6 +69,7 @@ const fetcher = async (url: string): Promise<ChatMessage[]> => {
 }
 
 type ChatActivity = { typingNames: string[]; onlineUserIds: string[] }
+type ConversationSyncItem = { id: string; lastMessageAt: string }
 type NotificationItem = { id: string; type: string; conversationId: string | null; messageId: string | null; title: string; body: string; readAt: string | null; createdAt: string }
 type GroupInvitation = { id: string; conversationId: string; inviterName: string; groupName: string | null; createdAt: string }
 type PeopleSearchResult = { id: string; name: string; username: string; image: string | null; conversationId: string }
@@ -100,6 +101,12 @@ const activityFetcher = async (url: string): Promise<ChatActivity> => {
 const notificationFetcher = async (url: string): Promise<NotificationItem[]> => {
   const response = await fetch(url, { credentials: 'same-origin' })
   if (!response.ok) throw new Error('Unable to load notifications')
+  return response.json()
+}
+
+const conversationSyncFetcher = async (url: string): Promise<ConversationSyncItem[]> => {
+  const response = await fetch(url, { credentials: 'same-origin' })
+  if (!response.ok) throw new Error('Unable to sync conversations')
   return response.json()
 }
 
@@ -202,6 +209,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
   const [membersPanelOpen, setMembersPanelOpen] = useState(Boolean(initialData.conversations[0]?.isGroup))
   const [mobileThreadOpen, setMobileThreadOpen] = useState(Boolean(initialData.conversations[0]))
   const tailRef = useRef<HTMLDivElement>(null)
+  const refreshRequestedForConversation = useRef(new Set<string>())
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const attachmentInputRef = useRef<HTMLInputElement>(null)
   const lastTypingSentAt = useRef(0)
@@ -220,6 +228,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
   const activityUrl = selectedId ? `/api/conversations/${encodeURIComponent(selectedId)}/activity` : null
   const { data: activity } = useSWR<ChatActivity>(activityUrl, activityFetcher, { refreshInterval: 2500, revalidateOnFocus: true })
   const { data: notificationsList = [], mutate: refreshNotifications } = useSWR<NotificationItem[]>('/api/notifications', notificationFetcher, { refreshInterval: 15000, revalidateOnFocus: true })
+  const { data: syncedConversations } = useSWR<ConversationSyncItem[]>('/api/conversations', conversationSyncFetcher, { refreshInterval: 8000, revalidateOnFocus: true })
   const { data: groupInvitations = [], mutate: refreshGroupInvitations } = useSWR<GroupInvitation[]>('/api/group-invitations', groupInvitationFetcher, { refreshInterval: 30000, revalidateOnFocus: true })
   const searchQuery = filter.trim()
   const peopleSearchUrl = searchMode === 'people' && searchQuery.length >= 2 ? `/api/search?type=people&q=${encodeURIComponent(searchQuery)}` : null
@@ -240,6 +249,32 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
   useEffect(() => {
     tailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }, [messages.length, selectedId])
+
+  useEffect(() => {
+    if (!syncedConversations) return
+
+    const visibleVersions = new Map(initialData.conversations.map((conversation) => [
+      conversation.id,
+      new Date(conversation.lastMessageAt).getTime(),
+    ]))
+    const staleConversations = syncedConversations.filter((conversation) => {
+      const visibleVersion = visibleVersions.get(conversation.id)
+      const incomingVersion = new Date(conversation.lastMessageAt).getTime()
+      if (visibleVersion === incomingVersion) {
+        refreshRequestedForConversation.current.delete(conversation.id)
+        return false
+      }
+      return true
+    })
+    const newlyStaleConversations = staleConversations.filter((conversation) =>
+      !refreshRequestedForConversation.current.has(conversation.id),
+    )
+
+    if (newlyStaleConversations.length) {
+      newlyStaleConversations.forEach((conversation) => refreshRequestedForConversation.current.add(conversation.id))
+      router.refresh()
+    }
+  }, [initialData.conversations, router, syncedConversations])
 
   useEffect(() => {
     if (!selectedMessageId || !messages.some((message) => message.id === selectedMessageId)) return
