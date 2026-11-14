@@ -17,6 +17,7 @@ import {
   users,
   verifications,
   messageReactions,
+  messageReceipts,
   conversationTyping,
   notifications,
   blockedUsers,
@@ -401,6 +402,76 @@ export async function deleteMessageAction(messageIdInput: string) {
     await tx.delete(messageAttachments).where(eq(messageAttachments.messageId, messageId))
   })
   if (attachmentRows.length) await del(attachmentRows.map((attachment) => attachment.pathname)).catch(() => undefined)
+}
+
+export async function clearConversationAction(conversationIdInput: string) {
+  const userId = await requireUserId()
+  const conversationId = conversationIdInput.trim()
+  if (!conversationId || conversationId.length > 80) throw new Error('Conversation not found.')
+
+  let removedPathnames: string[] = []
+  await db.transaction(async (tx) => {
+    const [conversation] = await tx.select({ id: conversations.id }).from(conversations)
+      .where(eq(conversations.id, conversationId)).for('update').limit(1)
+    if (!conversation) throw new Error('Conversation not found.')
+
+    const [membership] = await tx.select({ id: conversationMembers.id }).from(conversationMembers)
+      .where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, userId))).limit(1)
+    if (!membership) throw new Error('Conversation not found.')
+
+    const attachments = await tx.select({ pathname: messageAttachments.pathname }).from(messageAttachments)
+      .where(eq(messageAttachments.conversationId, conversationId))
+    removedPathnames = attachments.map((attachment) => attachment.pathname)
+
+    await tx.delete(messageAttachments).where(eq(messageAttachments.conversationId, conversationId))
+    await tx.delete(messageReactions).where(eq(messageReactions.conversationId, conversationId))
+    await tx.delete(messageReceipts).where(eq(messageReceipts.conversationId, conversationId))
+    await tx.delete(notifications).where(and(eq(notifications.conversationId, conversationId), isNotNull(notifications.messageId)))
+    await tx.delete(messages).where(eq(messages.conversationId, conversationId))
+    await tx.delete(conversationTyping).where(eq(conversationTyping.conversationId, conversationId))
+    await tx.update(conversations).set({ updatedAt: new Date() }).where(eq(conversations.id, conversationId))
+  })
+
+  if (removedPathnames.length) await del(removedPathnames).catch(() => undefined)
+}
+
+export async function deleteConversationAction(conversationIdInput: string) {
+  const userId = await requireUserId()
+  const conversationId = conversationIdInput.trim()
+  if (!conversationId || conversationId.length > 80) throw new Error('Conversation not found.')
+
+  let removedPathnames: string[] = []
+  await db.transaction(async (tx) => {
+    const [conversation] = await tx.select({ id: conversations.id, isGroup: conversations.isGroup }).from(conversations)
+      .where(eq(conversations.id, conversationId)).for('update').limit(1)
+    if (!conversation || conversation.isGroup) throw new Error('Conversation not found.')
+
+    const [membership] = await tx.select({ id: conversationMembers.id }).from(conversationMembers)
+      .where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, userId))).limit(1)
+    if (!membership) throw new Error('Conversation not found.')
+
+    const otherMembers = await tx.select({ userId: conversationMembers.userId }).from(conversationMembers)
+      .where(and(eq(conversationMembers.conversationId, conversationId), ne(conversationMembers.userId, userId)))
+
+    await tx.delete(notifications).where(and(eq(notifications.userId, userId), eq(notifications.conversationId, conversationId)))
+    await tx.delete(conversationMembers).where(and(eq(conversationMembers.conversationId, conversationId), eq(conversationMembers.userId, userId)))
+
+    if (!otherMembers.length) {
+      const attachments = await tx.select({ pathname: messageAttachments.pathname }).from(messageAttachments)
+        .where(eq(messageAttachments.conversationId, conversationId))
+      removedPathnames = attachments.map((attachment) => attachment.pathname)
+
+      await tx.delete(messageAttachments).where(eq(messageAttachments.conversationId, conversationId))
+      await tx.delete(messageReactions).where(eq(messageReactions.conversationId, conversationId))
+      await tx.delete(messageReceipts).where(eq(messageReceipts.conversationId, conversationId))
+      await tx.delete(notifications).where(eq(notifications.conversationId, conversationId))
+      await tx.delete(messages).where(eq(messages.conversationId, conversationId))
+      await tx.delete(conversationTyping).where(eq(conversationTyping.conversationId, conversationId))
+      await tx.delete(conversations).where(eq(conversations.id, conversationId))
+    }
+  })
+
+  if (removedPathnames.length) await del(removedPathnames).catch(() => undefined)
 }
 
 export async function toggleMessagePinAction(messageIdInput: string) {

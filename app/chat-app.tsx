@@ -36,6 +36,8 @@ import {
   createMediaStatusAction,
   createStatusAction,
   deleteMessageAction,
+  clearConversationAction,
+  deleteConversationAction,
   editMessageAction,
   toggleMessagePinAction,
   sendMessageAction,
@@ -48,6 +50,7 @@ import {
 import { submitMessageReportAction, submitUserReportAction } from '@/app/actions/admin'
 import { SettingsPanel } from '@/components/settings-panel'
 import { GroupManagementDialog } from '@/components/group-management-dialog'
+import { ConversationSettingsDialog } from '@/components/conversation-settings-dialog'
 import { ConversationMembersPanel } from '@/components/conversation-members-panel'
 import { ProfileCardDialog } from '@/components/profile-card-dialog'
 import { formatFileSize, MessageAttachmentCard, StatusMediaPreview } from '@/components/chat-media'
@@ -206,6 +209,7 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
   const [messageNotice, setMessageNotice] = useState('')
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [groupManagementId, setGroupManagementId] = useState<string | null>(null)
+  const [conversationSettingsOpen, setConversationSettingsOpen] = useState(false)
   const [membersPanelOpen, setMembersPanelOpen] = useState(Boolean(initialData.conversations[0]?.isGroup))
   const [mobileThreadOpen, setMobileThreadOpen] = useState(Boolean(initialData.conversations[0]))
   const tailRef = useRef<HTMLDivElement>(null)
@@ -371,6 +375,34 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
       router.refresh()
     } catch {
       setError('This message could not be deleted. Please try again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function clearActiveConversation() {
+    if (!selectedId || pending) return
+    setPending(true)
+    try {
+      await clearConversationAction(selectedId)
+      await Promise.all([refreshMessages(), refreshNotifications()])
+      router.refresh()
+      setMessageNotice('Conversation cleared for everyone.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function deleteActiveConversation() {
+    if (!selectedId || pending) return
+    setPending(true)
+    try {
+      await deleteConversationAction(selectedId)
+      setSelectedId(null)
+      setMobileThreadOpen(false)
+      setMembersPanelOpen(false)
+      setMessageNotice('Conversation removed from your chat list.')
+      router.refresh()
     } finally {
       setPending(false)
     }
@@ -762,10 +794,8 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
                 <button className="back-button" type="button" aria-label="Back to conversations" onClick={() => setMobileThreadOpen(false)}><ArrowLeft aria-hidden="true" /></button>
                 <Avatar name={selectedConversation.name} image={selectedConversation.image} group={selectedConversation.isGroup} decoration={selectedConversationContact?.avatarDecoration ?? selectedConversation.avatarDecoration} onClick={selectedConversationContact ? () => setProfileCardPerson(selectedConversationContact) : undefined} />
                 <div className="conversation-heading"><h2>{selectedConversation.name}</h2><p>{activity?.typingNames.length ? `${activity.typingNames.join(', ')} typing…` : selectedConversation.isGroup ? `Group · ${selectedConversation.participantCount} members` : activity?.onlineUserIds.length ? 'online' : 'Conversation'}</p></div>
-                {selectedConversation.isGroup ? <>
-                  <button className={`group-details-button member-panel-toggle${membersPanelOpen ? ' is-active' : ''}`} type="button" aria-label={membersPanelOpen ? 'Hide group members' : 'Show group members'} aria-expanded={membersPanelOpen} aria-controls={membersPanelOpen ? 'conversation-member-panel' : undefined} onClick={() => setMembersPanelOpen((open) => !open)}><UsersRound aria-hidden="true" /><span>Members</span></button>
-                  <button className="group-details-button" type="button" onClick={() => setGroupManagementId(selectedConversation.id)}><Settings2 aria-hidden="true" /><span>Manage</span></button>
-                </> : null}
+                {selectedConversation.isGroup ? <button className={`group-details-button member-panel-toggle${membersPanelOpen ? ' is-active' : ''}`} type="button" aria-label={membersPanelOpen ? 'Hide group members' : 'Show group members'} aria-expanded={membersPanelOpen} aria-controls={membersPanelOpen ? 'conversation-member-panel' : undefined} onClick={() => setMembersPanelOpen((open) => !open)}><UsersRound aria-hidden="true" /><span>Members</span></button> : null}
+                <button className="group-details-button" type="button" aria-label={`Conversation settings for ${selectedConversation.name}`} onClick={() => setConversationSettingsOpen(true)}><Settings2 aria-hidden="true" /><span>Settings</span></button>
               </header>
               {pinnedMessages.length ? <div className="pinned-message-strip" role="group" aria-label={`Pinned messages, ${pinnedMessages.length} of 3`}>
                 <span className="pinned-message-label"><Pin aria-hidden="true" /><strong>Pinned</strong><small>{pinnedMessages.length}/3</small></span>
@@ -1024,6 +1054,17 @@ export function ChatApp({ initialData, initialTheme }: { initialData: WorkspaceD
           </section>
         </div>
       ) : null}
+      {conversationSettingsOpen && selectedConversation ? <ConversationSettingsDialog
+        conversationName={selectedConversation.name}
+        isGroup={selectedConversation.isGroup}
+        onClose={() => setConversationSettingsOpen(false)}
+        onClear={clearActiveConversation}
+        onDelete={deleteActiveConversation}
+        onManageGroup={() => {
+          setConversationSettingsOpen(false)
+          setGroupManagementId(selectedConversation.id)
+        }}
+      /> : null}
       {groupManagementId ? (() => {
         const group = initialData.conversations.find((conversation) => conversation.id === groupManagementId && conversation.isGroup)
         return group ? <GroupManagementDialog conversationId={group.id} groupName={group.name} description={group.description} viewerId={initialData.user.id} viewerRole={group.role} onClose={() => setGroupManagementId(null)} onLeft={() => { setGroupManagementId(null); setSelectedId(null); setMobileThreadOpen(false) }} /> : null
